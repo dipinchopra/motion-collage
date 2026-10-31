@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { editorLayout, portraitSize } from './viewport-layout.js';
 import { TOOLS, toolTransform } from './tool-layout.js';
 import { MODEL_SIZE } from './segmentation-data.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -40,12 +41,17 @@ const photoCount = () => state.assets.filter((asset) => asset.kind !== 'text').l
 const state = { assets: [], tool: 'motion', mode: 'standard', speed: 1, direction: 1, depth: 0.7, scale: 1, pivotY: 0, positionX: 0, positionY: 0, canvasColor: '#f1f0ed', backgroundTexture: null, backgroundBitmap: null, exporting: false, frame: 0, turntableAngle: 0, nextLayerOrder: 0, selectedAsset: 0, playing: true };
 
 function resize() {
-  const rect = canvas.getBoundingClientRect();
+  const wrap = $('.stage-wrap');
+  const rect = wrap.getBoundingClientRect();
   if (!rect.width || !rect.height) return;
-  $('.stage-wrap').style.setProperty('--preview-width', `${rect.width}px`);
+  const { width, height } = portraitSize(rect.width, rect.height);
+  wrap.style.setProperty('--canvas-css-width', `${width}px`);
+  wrap.style.setProperty('--canvas-css-height', `${height}px`);
+  wrap.style.setProperty('--preview-width', `${width}px`);
+  wrap.style.setProperty('--preview-controls-width', `${Math.min(rect.width, Math.max(128, width))}px`);
   const size = renderer.getSize(new THREE.Vector2());
-  if (Math.round(size.x) !== Math.round(rect.width) || Math.round(size.y) !== Math.round(rect.height)) renderer.setSize(Math.round(rect.width), Math.round(rect.height), false);
-  camera.aspect = rect.width / rect.height; camera.updateProjectionMatrix();
+  if (Math.round(size.x) !== Math.round(width) || Math.round(size.y) !== Math.round(height)) renderer.setSize(Math.max(1, Math.round(width)), Math.max(1, Math.round(height)), false);
+  camera.aspect = 9 / 16; camera.updateProjectionMatrix();
 }
 window.addEventListener('resize', resize);
 
@@ -638,6 +644,7 @@ function openSheet(name) {
   }
   $$('[data-sheet]').forEach((tab) => { const active = tab.dataset.sheet === name; tab.classList.toggle('active', active); tab.setAttribute('aria-expanded', String(active)); });
   $$('.sheet').forEach((sheet) => sheet.classList.toggle('active', sheet.id === `sheet-${name}`));
+  scheduleViewport();
   const activeTab = $('.sheet-tabs button.active');
   if (activeTab) {
     const tabs = $('.sheet-tabs');
@@ -710,10 +717,33 @@ document.addEventListener('pointerdown', (event) => { if (!$('.tool-switcher').c
 for (const [tool, keys] of [['orbit', ['radius', 'tilt', 'speed']], ['echo', ['copies', 'spacing', 'speed']]]) {
   for (const key of keys) $(`#${tool}-${key}`).addEventListener('input', (event) => { if (state.exporting) return; toolOptions[tool][key] = Number(event.currentTarget.value); if (key === 'copies') addLayers(); else updateComposition(); });
 }
+let viewportFrame = 0;
 function fitViewport() {
-  document.documentElement.style.setProperty('--app-height', `${window.visualViewport?.height || window.innerHeight}px`);
+  const viewport = window.visualViewport;
+  const height = Math.max(1, viewport?.height || window.innerHeight);
+  const active = document.activeElement;
+  const typing = active?.tagName === 'TEXTAREA' || (active?.tagName === 'INPUT' && ['text', 'search', 'email', 'url', 'number'].includes(active.type));
+  const keyboard = typing && window.innerHeight - height > 100;
+  const header = $('.topbar').getBoundingClientRect().height;
+  const inset = parseFloat(getComputedStyle($('.app')).paddingTop) || 0;
+  const layout = editorLayout({ height, header, insetTop: inset, keyboard, sheetOpen: Boolean($('.sheet.active')) });
+  document.body.classList.toggle('keyboard-open', keyboard);
+  document.body.classList.toggle('compact-editor', layout.compact);
+  const root = document.documentElement.style;
+  root.setProperty('--app-height', `${height}px`);
+  root.setProperty('--viewport-top', `${viewport?.offsetTop || 0}px`);
+  root.setProperty('--dock-height', `${layout.dockHeight}px`);
+  resize();
 }
-window.visualViewport?.addEventListener('resize', fitViewport);
+function scheduleViewport() {
+  cancelAnimationFrame(viewportFrame);
+  viewportFrame = requestAnimationFrame(fitViewport);
+}
+window.visualViewport?.addEventListener('resize', scheduleViewport);
+window.visualViewport?.addEventListener('scroll', scheduleViewport);
+window.addEventListener('resize', scheduleViewport);
+document.addEventListener('focusin', scheduleViewport);
+document.addEventListener('focusout', scheduleViewport);
 fitViewport();
 $('#sheet-share .sheet-heading p').textContent = `10-second video · 1080 × 1920 · ${mobileDevice ? 30 : 60} fps`;
 new ResizeObserver(resize).observe($('.stage-wrap'));
