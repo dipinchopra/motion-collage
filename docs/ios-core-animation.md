@@ -1,12 +1,15 @@
 # iOS animation mapping
 
-The web prototype keeps all three treatments to layer transforms and opacity. Its motion equations live in `src/tool-layout.js`; no animated blur, shader, or particle effect is required. The RMBG-1.4 model, q8 weights, masks, and background-removal behavior are unchanged by this layout update.
+The web prototype keeps all six treatments to layer transforms and opacity. Its motion equations live in `src/tool-layout.js`; no animated blur, shader, or particle effect is required. The RMBG-1.4 model, q8 weights, masks, and background-removal behavior are unchanged by this layout update.
 
 | Tool | Native representation | Tunings |
 | --- | --- | --- |
 | Motion | Centered image/text layers under a `CATransformLayer`; animate Y rotation with `CABasicAnimation`, preserving individual angle offsets and perspective. | Whole turns per 10 seconds, angle spacing, scale, direction |
 | Orbit | Animate position, Z translation, Y/Z rotation from the periodic transform values with `CAKeyframeAnimation`. Use a 3D-preserving container for depth ordering. | Radius, tilt, whole turns per 10 seconds |
 | Echo | Separate layers sharing the same `CGImage`, following the same periodic motion at staggered phases. Each has fixed scale and opacity. This preserves the exact treatment without duplicating image data. | Copies (2–5), phase spacing, whole turns per 10 seconds |
+| Shutters | Crop the shared image into horizontal `contentsRect` bands. Each band rotates around its own X axis with staggered `CAKeyframeAnimation`; perspective stays on the parent. | Bands (3–8), fold angle, tempo |
+| Ribbon | Tile image/text layers in rows inside a clipped container. Translate the repeated tile group one full tile width per cycle; alternating rows run in opposite directions. | Rows (1–3), slant, speed |
+| Stamp | Predetermined positions and tilts, sequential scale overshoot keyframes, then a synchronized opacity clear. Reuse the same contents for each impression. | Stamps (1–4 per asset), impact, tempo |
 
 ## Porting rules
 

@@ -166,8 +166,33 @@ function getMask(image) {
   });
 }
 
-const toolOptions = { orbit: { radius: 0.5, tilt: 0.6, speed: 1 }, echo: { copies: 4, spacing: 0.13, speed: 1 } };
+const toolOptions = { orbit: { radius: 0.5, tilt: 0.6, speed: 1 }, echo: { copies: 4, spacing: 0.13, speed: 1 }, shutters: { bands: 6, fold: 1.4, speed: 1 }, ribbon: { rows: 2, slant: -0.12, speed: 1 }, stamp: { hits: 3, punch: 0.24, speed: 2 } };
 function motionCycles() { return state.tool === 'motion' ? state.speed : toolOptions[state.tool].speed; }
+function layerGeometry(asset, band = 0, bands = 1) {
+  const aspect = asset.image.width / asset.image.height;
+  const width = asset.kind === 'text' ? 2.1 : Math.min(aspect, 1.4) * 2.1;
+  const height = asset.kind === 'text' ? 2.1 / aspect : 2.1;
+  const geometry = new THREE.PlaneGeometry(width, height / bands);
+  if (bands > 1) {
+    const uv = geometry.attributes.uv;
+    for (let i = 0; i < uv.count; i++) uv.setY(i, (uv.getY(i) + bands - 1 - band) / bands);
+    uv.needsUpdate = true;
+  }
+  geometry.userData.bandOffset = height * (0.5 - (band + 0.5) / bands);
+  return geometry;
+}
+function refreshLayerGeometry(asset, layer) {
+  const old = new Set(layer.instances.map((mesh) => mesh.geometry));
+  const bands = state.tool === 'shutters' ? layer.instances.length : 1;
+  const shared = bands === 1 ? layerGeometry(asset) : null;
+  layer.instances.forEach((mesh, index) => {
+    mesh.geometry = shared || layerGeometry(asset, index, bands);
+    mesh.material.map = layer.texture;
+    mesh.material.needsUpdate = true;
+  });
+  old.forEach((geometry) => geometry.dispose());
+}
+
 function addLayers() {
   const geometries = new Set();
   const materials = new Set();
@@ -175,19 +200,19 @@ function addLayers() {
   geometries.forEach((geometry) => geometry.dispose());
   materials.forEach((material) => material.dispose());
   pivot.clear();
-  state.assets.forEach((asset) => {
+  state.assets.forEach((asset, assetIndex) => {
     const axis = new THREE.Group();
     pivot.add(axis);
     asset.axis = axis;
-    const aspect = asset.image.width / asset.image.height;
     asset.layers.forEach((layer) => {
-      const geometry = new THREE.PlaneGeometry(asset.kind === 'text' ? 2.1 : Math.min(aspect, 1.4) * 2.1, asset.kind === 'text' ? 2.1 / aspect : 2.1);
-      const copies = state.tool === 'echo' && asset.kind !== 'text' ? toolOptions.echo.copies : 1;
+      const bands = state.tool === 'shutters' ? toolOptions.shutters.bands : 1;
+      const copies = state.tool === 'shutters' ? bands : state.tool === 'ribbon' ? toolOptions.ribbon.rows * 3 : state.tool === 'stamp' ? toolOptions.stamp.hits : state.tool === 'echo' && asset.kind !== 'text' ? toolOptions.echo.copies : 1;
+      const geometry = bands === 1 ? layerGeometry(asset) : null;
       layer.instances = [];
       for (let copy = 0; copy < copies; copy++) {
         const material = new THREE.MeshBasicMaterial({ map: layer.texture, transparent: true, side: THREE.DoubleSide, depthWrite: false, color: state.tool === 'echo' && copy < copies - 1 ? '#ed8c98' : '#ffffff' });
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.renderOrder = state.tool === 'orbit' ? 0 : layer.order * 6 + copy;
+        const mesh = new THREE.Mesh(geometry || layerGeometry(asset, copy, bands), material);
+        mesh.renderOrder = state.tool === 'orbit' ? 0 : state.tool === 'stamp' ? (assetIndex * toolOptions.stamp.hits + copy) * 100 + layer.order : layer.order * 64 + copy;
         axis.add(mesh);
         layer.instances.push(mesh);
       }
@@ -208,13 +233,15 @@ function updateComposition(phase = state.turntableAngle) {
     asset.axis.rotation.set(0, 0, 0);
     asset.layers.forEach((layer) => {
       layer.instances.forEach((mesh, copy) => {
-        const transform = toolTransform(state.tool, { index, count, text, phase, depth: state.depth, ...toolOptions.orbit, ...toolOptions.echo, copy, copies: layer.instances.length });
+        const transform = toolTransform(state.tool, { index, count, text, phase, depth: state.depth, ...(toolOptions[state.tool] || {}), copy, copies: layer.instances.length });
         if (state.tool === 'motion') asset.axis.rotation.y = transform.ry;
-        mesh.position.set(transform.x, transform.y + layer.height + (state.tool === 'motion' ? state.pivotY : 0), transform.z);
-        mesh.rotation.set(0, state.tool === 'motion' ? 0 : transform.ry, transform.rz + layer.angle);
-        mesh.scale.setScalar(asset.size * layer.scale * transform.scale * (state.tool === 'motion' ? state.scale : 1));
+        const scale = asset.size * layer.scale * transform.scale * (state.tool === 'motion' ? state.scale : 1);
+        const bandOffset = (mesh.geometry.userData.bandOffset || 0) * scale;
+        mesh.position.set(transform.x, transform.y + bandOffset + layer.height + (state.tool === 'motion' ? state.pivotY : 0), transform.z);
+        mesh.rotation.set(transform.rx || 0, state.tool === 'motion' ? 0 : transform.ry, transform.rz + layer.angle);
+        mesh.scale.setScalar(scale);
         mesh.material.opacity = transform.opacity;
-        mesh.visible = layer.visible;
+        mesh.visible = layer.visible && transform.opacity > 0.001 && scale > 0.0001;
       });
     });
   });
@@ -278,13 +305,7 @@ async function renderText(asset) {
   layer.texture = texture;
   asset.image = surface;
   asset.cutoutUrl = thumbnailUrl(surface);
-  if (layer.mesh) {
-    layer.mesh.material.map = texture;
-    layer.mesh.material.needsUpdate = true;
-    layer.mesh.geometry.dispose();
-    layer.mesh.geometry = new THREE.PlaneGeometry(2.1, 2.1 * surface.height / surface.width);
-    layer.mesh.visible = layer.visible;
-  }
+  if (layer.instances?.length) refreshLayerGeometry(asset, layer);
   releaseTexture(previous);
   const thumbnail = $(`[data-select-asset="${state.assets.indexOf(asset)}"] img`);
   if (thumbnail) thumbnail.src = asset.cutoutUrl;
@@ -469,7 +490,7 @@ function setCanvasColor(color) {
   $('.stage-wrap').style.setProperty('--canvas-color', color);
 }
 
-const toolBackdrops = { motion: { color: '#f1f0ed' }, orbit: { preset: 'plaid' }, echo: { color: '#ffc9dd' } };
+const toolBackdrops = { motion: { color: '#f1f0ed' }, orbit: { preset: 'plaid' }, echo: { color: '#ffc9dd' }, shutters: { preset: 'burgundy' }, ribbon: { color: '#f1e8d4' }, stamp: { preset: 'plaid' } };
 let backgroundRequest = 0;
 let backgroundLoading = false;
 
@@ -680,6 +701,7 @@ async function selectTool(name) {
   if (state.tool === name) { setToolMenu(false, true); return; }
   const backdrop = { ...toolBackdrops[name] };
   state.tool = name;
+  state.turntableAngle = 0;
   setToolMenu(false, true);
   document.body.dataset.tool = name;
   document.documentElement.style.setProperty('--accent', TOOLS[name].accent);
@@ -714,8 +736,8 @@ $('#tool-menu').addEventListener('keydown', (event) => {
   if (['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); const items = [...$$('[data-tool]')]; const index = items.indexOf(document.activeElement); items[(index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus(); }
 });
 document.addEventListener('pointerdown', (event) => { if (!$('.tool-switcher').contains(event.target)) setToolMenu(false); });
-for (const [tool, keys] of [['orbit', ['radius', 'tilt', 'speed']], ['echo', ['copies', 'spacing', 'speed']]]) {
-  for (const key of keys) $(`#${tool}-${key}`).addEventListener('input', (event) => { if (state.exporting) return; toolOptions[tool][key] = Number(event.currentTarget.value); if (key === 'copies') addLayers(); else updateComposition(); });
+for (const [tool, keys] of [['orbit', ['radius', 'tilt', 'speed']], ['echo', ['copies', 'spacing', 'speed']], ['shutters', ['bands', 'fold', 'speed']], ['ribbon', ['rows', 'slant', 'speed']], ['stamp', ['hits', 'punch', 'speed']]]) {
+  for (const key of keys) $(`#${tool}-${key}`).addEventListener('input', (event) => { if (state.exporting) return; toolOptions[tool][key] = Number(event.currentTarget.value); if (['copies', 'bands', 'rows', 'hits'].includes(key)) addLayers(); else updateComposition(); });
 }
 let viewportFrame = 0;
 function fitViewport() {
@@ -731,6 +753,7 @@ function fitViewport() {
   document.body.classList.toggle('compact-editor', layout.compact);
   const root = document.documentElement.style;
   root.setProperty('--app-height', `${height}px`);
+  root.setProperty('--header-height', `${header}px`);
   root.setProperty('--viewport-top', `${viewport?.offsetTop || 0}px`);
   root.setProperty('--dock-height', `${layout.dockHeight}px`);
   resize();
