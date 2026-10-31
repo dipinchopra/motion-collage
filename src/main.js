@@ -430,7 +430,7 @@ function updateLayerList() {
   const optionScroll = editor.querySelector('.layer-options')?.scrollLeft || 0;
   const focused = editor.contains(document.activeElement) ? { index: document.activeElement.dataset.layerIndex, action: document.activeElement.dataset.layerAction } : null;
   $('#selected-caption').textContent = asset ? `Photo ${state.selectedAsset + 1}` : 'Select a photo above';
-  editor.innerHTML = asset ? `<div class="layer-options" role="group" aria-label="Image layers">${asset.layers.map((layer, index) => `<button class="layer-option ${layer.visible ? 'on' : ''}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="visibility" aria-pressed="${layer.visible}"><img src="${layerThumbnail(layer)}" alt=""><span>${layerName(layer)}</span><i>${layer.visible ? '✓' : '+'}</i></button>`).join('')}</div>${asset.layers.map((layer, index) => `<div class="layer-detail ${layer.visible ? '' : 'inactive'}"><div class="layer-detail-head"><span>${layerName(layer)}</span><div><button aria-label="Move ${layerName(layer).toLowerCase()} backward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="back">↓</button><button aria-label="Move ${layerName(layer).toLowerCase()} forward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="forward">↑</button></div></div><div class="mask-controls">${[['height','Height',-0.8,0.8],['angle','Tilt',-1.2,1.2],['scale','Size',0.4,1.4]].map(([key,label,min,max]) => `<label>${label}<input aria-label="${layerName(layer)} ${label.toLowerCase()}" type="range" min="${min}" max="${max}" step="0.01" value="${layer[key]}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="${key}"></label>`).join('')}</div>${layer.kind === 'inverse' ? `<label class="panel-color">Panel color<input type="color" value="${layer.color}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="color"></label>` : ''}</div>`).join('')}<button class="delete-photo" data-asset-index="${state.selectedAsset}" data-layer-action="delete">Remove photo</button>` : '<p class="no-selection">Add a photo to start editing.</p>';
+  editor.innerHTML = asset ? `<div class="layer-options" role="group" aria-label="Image layers">${asset.layers.map((layer, index) => `<button class="layer-option ${layer.visible ? 'on' : ''}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="visibility" aria-pressed="${layer.visible}"><img src="${layerThumbnail(layer)}" alt=""><span>${layerName(layer)}</span><i>${layer.visible ? '✓' : '+'}</i></button>`).join('')}</div>${asset.layers.map((layer, index) => `<div class="layer-detail ${layer.visible ? '' : 'inactive'}" data-layer-detail="${index}"><div class="layer-detail-head"><span>${layerName(layer)}</span><div><button aria-label="Move ${layerName(layer).toLowerCase()} backward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="back">↓</button><button aria-label="Move ${layerName(layer).toLowerCase()} forward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="forward">↑</button></div></div><div class="mask-controls">${[['height','Height',-0.8,0.8],['angle','Tilt',-1.2,1.2],['scale','Size',0.4,1.4]].map(([key,label,min,max]) => `<label>${label}<input aria-label="${layerName(layer)} ${label.toLowerCase()}" type="range" min="${min}" max="${max}" step="0.01" value="${layer[key]}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="${key}"></label>`).join('')}</div>${layer.kind === 'inverse' ? `<label class="panel-color">Panel color<input type="color" value="${layer.color}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="color"></label>` : ''}</div>`).join('')}<button class="delete-photo" data-asset-index="${state.selectedAsset}" data-layer-action="delete">Remove photo</button>` : '<p class="no-selection">Add a photo to start editing.</p>';
   list.querySelectorAll('[data-select-asset]').forEach((button) => button.addEventListener('click', () => { state.selectedAsset = Number(button.dataset.selectAsset); updateLayerList(); openSheet(state.assets[state.selectedAsset].kind === 'text' ? 'text' : state.assets[state.selectedAsset].kind === 'sticker' ? 'stickers' : 'cutouts'); }));
   $('#asset-meta').textContent = `${photoCount()} / 5`;
   $('#upload-trigger').disabled = photoCount() >= 5;
@@ -441,11 +441,7 @@ function updateLayerList() {
     if (event.currentTarget.dataset.layerAction === 'height') layer.height = Number(event.currentTarget.value);
     if (event.currentTarget.dataset.layerAction === 'angle') layer.angle = Number(event.currentTarget.value);
     if (event.currentTarget.dataset.layerAction === 'scale') layer.scale = Number(event.currentTarget.value);
-    if (event.currentTarget.dataset.layerAction === 'visibility') {
-      const visible = !layer.visible;
-      if (visible) asset.layers.forEach((other) => { if (layer.kind === 'inverse' || other.kind === 'inverse') other.visible = false; });
-      layer.visible = visible;
-    }
+    if (event.currentTarget.dataset.layerAction === 'visibility') layer.visible = !layer.visible;
     if (event.currentTarget.dataset.layerAction === 'color') {
       layer.color = event.currentTarget.value;
       const context = layer.texture.image.getContext('2d');
@@ -466,6 +462,11 @@ function updateLayerList() {
     }
     if (['forward', 'back', 'visibility'].includes(event.currentTarget.dataset.layerAction)) addLayers();
     else updateComposition();
+    if (event.currentTarget.dataset.layerAction === 'visibility' && layer.visible) {
+      const detail = editor.querySelector(`[data-layer-detail="${event.currentTarget.dataset.layerIndex}"]`);
+      const sheet = $('#sheet-cutouts');
+      if (detail) sheet.scrollTo({ top: sheet.scrollTop + detail.getBoundingClientRect().top - sheet.getBoundingClientRect().top - 8, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    }
   }));
   editor.querySelectorAll('[data-layer-action="delete"]').forEach((button) => button.addEventListener('click', (event) => {
     const index = Number(event.currentTarget.dataset.assetIndex);
