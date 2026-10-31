@@ -637,6 +637,12 @@ function openSheet(name) {
   }
   $$('[data-sheet]').forEach((tab) => { const active = tab.dataset.sheet === name; tab.classList.toggle('active', active); tab.setAttribute('aria-expanded', String(active)); });
   $$('.sheet').forEach((sheet) => sheet.classList.toggle('active', sheet.id === `sheet-${name}`));
+  const activeTab = $('.sheet-tabs button.active');
+  if (activeTab) {
+    const tabs = $('.sheet-tabs');
+    const left = tabs.scrollLeft + activeTab.getBoundingClientRect().left - tabs.getBoundingClientRect().left - (tabs.clientWidth - activeTab.clientWidth) / 2;
+    tabs.scrollTo({ left, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  }
 }
 $$('[data-sheet]').forEach((button) => button.addEventListener('click', () => openSheet(currentSheet === button.dataset.sheet ? null : button.dataset.sheet)));
 $$('.sheet-close').forEach((button) => button.addEventListener('click', () => openSheet(null)));
