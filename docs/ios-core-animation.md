@@ -17,6 +17,7 @@ The web prototype keeps all six treatments to layer transforms and opacity. Its 
 - A full loop is 10 seconds. Sample `toolTransform` at phase `t × 2π × cycles × direction` for normalized `t` from 0 through 1. Include both endpoints in the native keyframes; video frames exclude the duplicate endpoint.
 - Core Animation's view-space Y direction is opposite the prototype's world-space Y. Negate Y when mapping positions; match camera perspective using `sublayerTransform.m34` and the container's dimensions.
 - Keep text and inverse panels as shared raster layer contents to match the prototype. Mask edges retain their alpha.
+- The shared-axis treatment animates one parent rotation; child wing angles stay fixed. Full image planes are evenly spaced over 180° by default (two planes form four wings at 90°). Changing the angle control opts into manual spacing. Keep depth occlusion for opaque cutout pixels, and discard transparent mask pixels before depth writes.
 - For the shared-axis treatment, preserve the 3D layer hierarchy; an ordinary flattened container will change intersections and depth ordering.
 - Pause/resume the parent layer's clock, so every image and text layer stays synchronized.
 - Speed zero deliberately freezes a composition. Other speed values are integer loops per export, so the video wraps without a jump.

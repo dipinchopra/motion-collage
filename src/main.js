@@ -38,7 +38,7 @@ const key = new THREE.DirectionalLight('#ffcf91', 3.5); key.position.set(-3, 4, 
 const fill = new THREE.DirectionalLight('#75d8d0', 2); fill.position.set(4, -2, 2); scene.add(fill);
 
 const photoCount = () => state.assets.filter((asset) => asset.kind !== 'text').length;
-const state = { assets: [], tool: 'motion', mode: 'standard', speed: 1, direction: 1, depth: 0.7, scale: 1, pivotY: 0, positionX: 0, positionY: 0, canvasColor: '#f1f0ed', backgroundTexture: null, backgroundBitmap: null, exporting: false, frame: 0, turntableAngle: 0, nextLayerOrder: 0, selectedAsset: 0, playing: true };
+const state = { assets: [], tool: 'motion', mode: 'standard', speed: 1, direction: 1, depth: Math.PI / 2, spacingAuto: true, scale: 1, pivotY: 0, positionX: 0, positionY: 0, canvasColor: '#f1f0ed', backgroundTexture: null, backgroundBitmap: null, exporting: false, frame: 0, turntableAngle: 0, nextLayerOrder: 0, selectedAsset: 0, playing: true };
 
 function resize() {
   const wrap = $('.stage-wrap');
@@ -194,6 +194,11 @@ function refreshLayerGeometry(asset, layer) {
 }
 
 function addLayers() {
+  if (state.tool === 'motion' && state.spacingAuto) {
+    state.depth = Math.PI / Math.max(2, state.assets.length);
+    $('#depth').value = String(state.depth);
+    $('#depth-value').textContent = state.depth.toFixed(2);
+  }
   const geometries = new Set();
   const materials = new Set();
   pivot.traverse((object) => { if (object.isMesh) { geometries.add(object.geometry); materials.add(object.material); } });
@@ -210,9 +215,9 @@ function addLayers() {
       const geometry = bands === 1 ? layerGeometry(asset) : null;
       layer.instances = [];
       for (let copy = 0; copy < copies; copy++) {
-        const material = new THREE.MeshBasicMaterial({ map: layer.texture, transparent: true, side: THREE.DoubleSide, depthWrite: false, color: state.tool === 'echo' && copy < copies - 1 ? '#ed8c98' : '#ffffff' });
+        const material = new THREE.MeshBasicMaterial({ map: layer.texture, transparent: true, side: THREE.DoubleSide, depthWrite: state.tool === 'motion', alphaTest: state.tool === 'motion' ? 0.02 : 0, color: state.tool === 'echo' && copy < copies - 1 ? '#ed8c98' : '#ffffff' });
         const mesh = new THREE.Mesh(geometry || layerGeometry(asset, copy, bands), material);
-        mesh.renderOrder = state.tool === 'orbit' ? 0 : state.tool === 'stamp' ? (assetIndex * toolOptions.stamp.hits + copy) * 100 + layer.order : layer.order * 64 + copy;
+        mesh.renderOrder = state.tool === 'motion' || state.tool === 'orbit' ? 0 : state.tool === 'stamp' ? (assetIndex * toolOptions.stamp.hits + copy) * 100 + layer.order : layer.order * 64 + copy;
         axis.add(mesh);
         layer.instances.push(mesh);
       }
@@ -224,6 +229,8 @@ function addLayers() {
 }
 
 function updateComposition(phase = state.turntableAngle) {
+  // One rigid assembly: animation belongs to the parent, not its wings.
+  pivot.rotation.set(0, state.tool === 'motion' ? phase : 0, 0);
   pivot.position.set(state.tool === 'motion' ? state.positionX : 0, state.tool === 'motion' ? state.positionY : 0, 0);
   state.assets.forEach((asset, assetIndex) => {
     const text = asset.kind === 'text';
@@ -233,7 +240,7 @@ function updateComposition(phase = state.turntableAngle) {
     asset.axis.rotation.set(0, 0, 0);
     asset.layers.forEach((layer) => {
       layer.instances.forEach((mesh, copy) => {
-        const transform = toolTransform(state.tool, { index, count, text, phase, depth: state.depth, ...(toolOptions[state.tool] || {}), copy, copies: layer.instances.length });
+        const transform = toolTransform(state.tool, { index, count, text, phase: state.tool === 'motion' ? 0 : phase, depth: state.depth, ...(toolOptions[state.tool] || {}), copy, copies: layer.instances.length });
         if (state.tool === 'motion') asset.axis.rotation.y = transform.ry;
         const scale = asset.size * layer.scale * transform.scale * (state.tool === 'motion' ? state.scale : 1);
         const bandOffset = (mesh.geometry.userData.bandOffset || 0) * scale;
@@ -606,6 +613,7 @@ $('#upload-trigger').addEventListener('dragover', (event) => { event.preventDefa
 $('#upload-trigger').addEventListener('dragleave', () => $('#upload-trigger').classList.remove('dragging'));
 $('#upload-trigger').addEventListener('drop', (event) => { event.preventDefault(); $('#upload-trigger').classList.remove('dragging'); handleUpload(event.dataTransfer.files); });
 $$('#speed, #depth, #scale, #pivot-y, #position-x, #position-y').forEach((input) => input.addEventListener('input', syncControls));
+$('#depth').addEventListener('input', () => { state.spacingAuto = false; });
 $('#speed').addEventListener('input', () => $$('[data-speed]').forEach((button) => button.classList.toggle('selected', Number(button.dataset.speed) === state.speed)));
 $('#canvas-color').addEventListener('input', (event) => { clearBackgroundImage(); setCanvasColor(event.target.value); });
 const backgroundPresets = [
