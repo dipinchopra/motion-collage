@@ -29,6 +29,7 @@ scene.add(new THREE.AmbientLight('#fff7e7', 2.2));
 const key = new THREE.DirectionalLight('#ffcf91', 3.5); key.position.set(-3, 4, 5); scene.add(key);
 const fill = new THREE.DirectionalLight('#75d8d0', 2); fill.position.set(4, -2, 2); scene.add(fill);
 
+const photoCount = () => state.assets.filter((asset) => asset.kind !== 'text').length;
 const state = { assets: [], segmenter: null, mode: 'standard', speed: 0.55, direction: 1, depth: 0.7, scale: 1, pivotY: 0, positionX: 0, positionY: 0, canvasColor: '#f1f0ed', backgroundTexture: null, backgroundBitmap: null, exporting: false, frame: 0, turntableAngle: 0, nextLayerOrder: 0, selectedAsset: 0, playing: true };
 
 function resize() {
@@ -81,7 +82,7 @@ function addLayers() {
     const aspect = asset.image.width / asset.image.height;
     asset.layers.forEach((layer) => {
       const material = new THREE.MeshBasicMaterial({ map: layer.texture, transparent: true, side: THREE.DoubleSide, depthWrite: false, color: 0xffffff });
-      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(aspect, 1.4) * 2.1, 2.1), material);
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(asset.kind === 'text' ? 2.1 : Math.min(aspect, 1.4) * 2.1, asset.kind === 'text' ? 2.1 / aspect : 2.1), material);
       mesh.position.set(0, state.pivotY + layer.height, 0);
       mesh.rotation.y = 0;
       mesh.rotation.z = layer.angle;
@@ -95,20 +96,119 @@ function addLayers() {
   updateLayerList();
 }
 
+function selectedText() {
+  const asset = state.assets[state.selectedAsset];
+  return asset?.kind === 'text' ? asset : null;
+}
+
+function syncTextControls() {
+  const asset = selectedText();
+  $('#text-controls').hidden = !asset;
+  $('#add-text').disabled = state.assets.filter((entry) => entry.kind === 'text').length >= 10;
+  if (!asset) return;
+  $('#text-content').value = asset.text;
+  $('#text-size').value = asset.layers[0].scale;
+  $('#text-height').value = asset.layers[0].height;
+  $('#text-color').value = asset.color;
+  $('#text-visibility').textContent = asset.layers[0].visible ? 'Hide text' : 'Show text';
+  $('#text-visibility').setAttribute('aria-pressed', String(asset.layers[0].visible));
+  $$('[data-font]').forEach((button) => { const active = button.dataset.font === asset.font; button.classList.toggle('selected', active); button.setAttribute('aria-pressed', String(active)); });
+}
+
+async function renderText(asset) {
+  const revision = asset.revision = (asset.revision || 0) + 1;
+  const weight = asset.font === 'Manrope' ? 800 : 400;
+  try {
+    await document.fonts.load(`${weight} 100px "${asset.font}"`);
+  } catch (error) {
+    console.error(error);
+    $('#font-status').textContent = 'Font could not load. Try again.';
+    return false;
+  }
+  if (revision !== asset.revision || !state.assets.includes(asset)) return false;
+  $('#font-status').textContent = '';
+  const surface = document.createElement('canvas');
+  const context = surface.getContext('2d');
+  context.font = `${weight} 100px "${asset.font}"`;
+  const lines = [];
+  for (const paragraph of asset.text.split('\n')) {
+    let line = '';
+    for (const character of paragraph) {
+      if (context.measureText(line + character).width > 900 && line) { lines.push(line); line = ''; }
+      line += character;
+    }
+    lines.push(line);
+  }
+  surface.width = 1024;
+  const fontSize = Math.min(100, 1800 / (Math.max(1, lines.length) * 1.4));
+  const lineHeight = fontSize * 1.4;
+  surface.height = Math.max(180, Math.ceil(lines.length * lineHeight + 100));
+  context.font = `${weight} ${fontSize}px "${asset.font}"`;
+  context.fillStyle = asset.color;
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  lines.forEach((line, index) => context.fillText(line, 512, 50 + lineHeight / 2 + index * lineHeight));
+  const texture = new THREE.CanvasTexture(surface);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const layer = asset.layers[0];
+  const previous = layer.texture;
+  layer.texture = texture;
+  asset.image = surface;
+  asset.cutoutUrl = surface.toDataURL();
+  if (layer.mesh) {
+    layer.mesh.material.map = texture;
+    layer.mesh.material.needsUpdate = true;
+    layer.mesh.geometry.dispose();
+    layer.mesh.geometry = new THREE.PlaneGeometry(2.1, 2.1 * surface.height / surface.width);
+    layer.mesh.visible = layer.visible;
+  }
+  previous?.dispose();
+  const thumbnail = $(`[data-select-asset="${state.assets.indexOf(asset)}"] img`);
+  if (thumbnail) thumbnail.src = asset.cutoutUrl;
+  return true;
+}
+
+function queueText(asset) {
+  asset.pending = renderText(asset);
+  return asset.pending;
+}
+
+async function addText() {
+  if (state.exporting || state.assets.filter((asset) => asset.kind === 'text').length >= 10) return;
+  const placeholder = document.createElement('canvas');
+  placeholder.width = 1024; placeholder.height = 180;
+  const asset = { image: placeholder, cutoutUrl: placeholder.toDataURL(), kind: 'text', text: 'Your text', font: 'Manrope', color: '#171717', size: 1, layers: [{ texture: new THREE.CanvasTexture(placeholder), kind: 'text', visible: true, height: 0, angle: 0, scale: 1, order: state.nextLayerOrder++ }] };
+  state.assets.push(asset);
+  state.selectedAsset = state.assets.length - 1;
+  addLayers();
+  openSheet('text');
+  // Focus during the tap event so mobile browsers can open the keyboard.
+  $('#text-content').focus();
+  $('#text-content').select();
+  const rendered = await queueText(asset);
+  if (!rendered && asset.revision === 1 && state.assets.includes(asset)) {
+    asset.layers[0].texture.dispose();
+    state.assets.splice(state.assets.indexOf(asset), 1);
+    addLayers();
+  }
+}
+
 function allLayers() {
   return state.assets.flatMap((asset, assetIndex) => asset.layers.map((layer) => ({ asset, assetIndex, layer })));
 }
 
 function updateLayerList() {
+  $('#empty-state').classList.toggle('hidden', state.assets.length > 0);
   const list = $('#layer-list');
-  list.innerHTML = state.assets.length ? state.assets.map((asset, index) => `<button class="cutout-tile ${index === state.selectedAsset ? 'selected' : ''} ${asset.layers.some((layer) => layer.visible) ? '' : 'muted'}" data-select-asset="${index}" aria-label="Edit photo ${index + 1}" aria-pressed="${index === state.selectedAsset}"><img src="${asset.cutoutUrl}" alt=""><span>${String(index + 1).padStart(2, '0')}</span></button>`).join('') : '<span class="tray-placeholder">Your cutouts go here</span>';
-  const asset = state.assets[state.selectedAsset];
+  list.innerHTML = state.assets.length ? state.assets.map((asset, index) => `<button class="cutout-tile ${asset.kind === 'text' ? 'text-tile' : ''} ${index === state.selectedAsset ? 'selected' : ''} ${asset.layers.some((layer) => layer.visible) ? '' : 'muted'}" data-select-asset="${index}" aria-label="Edit ${asset.kind === 'text' ? 'text' : 'photo'} ${index + 1}" aria-pressed="${index === state.selectedAsset}"><img src="${asset.cutoutUrl}" alt=""><span>${String(index + 1).padStart(2, '0')}</span></button>`).join('') : '<span class="tray-placeholder">Your cutouts go here</span>';
+  const selected = state.assets[state.selectedAsset];
+  const asset = selected?.kind === 'text' ? null : selected;
   const editor = $('#cutout-editor');
   $('#selected-caption').textContent = asset ? `Photo ${state.selectedAsset + 1}` : 'Select a photo above';
   editor.innerHTML = asset ? `<div class="layer-options">${asset.layers.map((layer, index) => `<button class="layer-option ${layer.visible ? 'on' : ''}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="visibility" aria-pressed="${layer.visible}"><img src="${index === 0 ? asset.cutoutUrl : asset.previewUrl}" alt=""><span>${index === 0 ? 'Cutout' : 'Background'}</span><i>${layer.visible ? '✓' : '+'}</i></button>`).join('')}</div>${asset.layers.map((layer, index) => `<div class="layer-detail ${layer.visible ? '' : 'inactive'}"><div class="layer-detail-head"><span>${index === 0 ? 'Cutout' : 'Background'}</span><div><button aria-label="Move ${index === 0 ? 'cutout' : 'background'} backward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="back">↓</button><button aria-label="Move ${index === 0 ? 'cutout' : 'background'} forward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="forward">↑</button></div></div><div class="mask-controls">${[['height','Height',-0.8,0.8],['angle','Tilt',-1.2,1.2],['scale','Size',0.4,1.4]].map(([key,label,min,max]) => `<label>${label}<input aria-label="${index === 0 ? 'Cutout' : 'Background'} ${label.toLowerCase()}" type="range" min="${min}" max="${max}" step="0.01" value="${layer[key]}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="${key}"></label>`).join('')}</div></div>`).join('')}<button class="delete-photo" data-asset-index="${state.selectedAsset}" data-layer-action="delete">Remove photo</button>` : '<p class="no-selection">Add a photo to start editing.</p>';
-  list.querySelectorAll('[data-select-asset]').forEach((button) => button.addEventListener('click', () => { state.selectedAsset = Number(button.dataset.selectAsset); updateLayerList(); openSheet('cutouts'); }));
-  $('#asset-meta').textContent = `${state.assets.length} / 5`;
-  $('#upload-trigger').disabled = state.assets.length >= 5;
+  list.querySelectorAll('[data-select-asset]').forEach((button) => button.addEventListener('click', () => { state.selectedAsset = Number(button.dataset.selectAsset); updateLayerList(); openSheet(state.assets[state.selectedAsset].kind === 'text' ? 'text' : 'cutouts'); }));
+  $('#asset-meta').textContent = `${photoCount()} / 5`;
+  $('#upload-trigger').disabled = photoCount() >= 5;
   $('#export-btn').disabled = !state.assets.length;
   editor.querySelectorAll('[data-layer-index]').forEach((input) => input.addEventListener(input.tagName === 'BUTTON' ? 'click' : 'input', (event) => {
     const asset = state.assets[Number(event.currentTarget.dataset.assetIndex)];
@@ -139,10 +239,11 @@ function updateLayerList() {
     asset.image.close();
     state.assets.splice(index, 1);
     state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1));
-    $('#asset-meta').textContent = `${state.assets.length} / 5`;
-    if (!state.assets.length) $('#empty-state').classList.remove('hidden');
+    $('#asset-meta').textContent = `${photoCount()} / 5`;
+    $('#empty-state').classList.toggle('hidden', state.assets.length > 0);
     addLayers();
   }));
+  syncTextControls();
 }
 
 async function loadModel() {
@@ -190,7 +291,7 @@ async function segmentImage(file) {
   ] });
   state.selectedAsset = state.assets.length - 1;
   addLayers();
-  $('#empty-state').classList.add('hidden'); $('#asset-meta').textContent = `${state.assets.length} / 5`;
+  $('#empty-state').classList.add('hidden'); $('#asset-meta').textContent = `${photoCount()} / 5`;
   $('#model-status').textContent = 'Cutout ready';
   $('#model-progress').classList.remove('visible');
 }
@@ -254,6 +355,7 @@ async function setBackgroundImage(file) {
 async function exportLoop() {
   if (!state.assets.length || state.exporting || uploading) return;
   state.exporting = true; $('.bottom-dock').classList.add('recording'); $('#share-trigger').disabled = true; $('#export-btn').disabled = true; $('#export-progress').classList.add('visible'); $('#export-status').textContent = 'EXPORTING LOOP...';
+  await Promise.all(state.assets.filter((asset) => asset.kind === 'text').map((asset) => asset.pending));
   const width = 1080, height = 1920, fps = 60, frames = 600;
   const exportCanvas = document.createElement('canvas'); exportCanvas.width = width; exportCanvas.height = height;
   const exportRenderer = new THREE.WebGLRenderer({ canvas: exportCanvas, antialias: true, preserveDrawingBuffer: true }); exportRenderer.setSize(width, height, false); exportRenderer.outputColorSpace = THREE.SRGBColorSpace; exportRenderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -304,10 +406,10 @@ const handleUpload = async (files) => {
   $('#upload-trigger').setAttribute('aria-busy', 'true');
   $('#upload-trigger').disabled = true;
   $('#empty-upload').disabled = true;
-  const incoming = Array.from(files || []).filter(isSupportedImage).slice(0, 5 - state.assets.length);
+  const incoming = Array.from(files || []).filter(isSupportedImage).slice(0, 5 - photoCount());
   try {
     for (const file of incoming) await segmentImage(file).catch((error) => { console.error(error); $('#model-status').textContent = 'Could not create cutout. Try another photo.'; });
-  } finally { uploading = false; $('#upload-trigger').setAttribute('aria-busy', 'false'); $('#upload').value = ''; $('#upload-trigger').disabled = state.assets.length >= 5; $('#empty-upload').disabled = false; }
+  } finally { uploading = false; $('#upload-trigger').setAttribute('aria-busy', 'false'); $('#upload').value = ''; $('#upload-trigger').disabled = photoCount() >= 5; $('#empty-upload').disabled = false; }
 };
 $('#upload').addEventListener('change', (event) => handleUpload(event.target.files));
 $('#upload-trigger').addEventListener('click', () => $('#upload').click());
@@ -330,6 +432,13 @@ function animate() { requestAnimationFrame(animate); if (!state.exporting && sta
 let currentSheet = null;
 function openSheet(name) {
   currentSheet = name;
+  if (name === 'text') {
+    if (state.assets[state.selectedAsset]?.kind !== 'text') {
+      const index = state.assets.findIndex((asset) => asset.kind === 'text');
+      if (index >= 0) { state.selectedAsset = index; updateLayerList(); }
+    }
+    syncTextControls();
+  }
   $$('[data-sheet]').forEach((tab) => { const active = tab.dataset.sheet === name; tab.classList.toggle('active', active); tab.setAttribute('aria-expanded', String(active)); });
   $$('.sheet').forEach((sheet) => sheet.classList.toggle('active', sheet.id === `sheet-${name}`));
 }
@@ -342,6 +451,20 @@ $('#empty-upload').addEventListener('click', () => $('#upload').click());
 $('#play-toggle').addEventListener('click', () => { state.playing = !state.playing; $('#play-toggle').textContent = state.playing ? 'Ⅱ' : '▶'; $('#play-toggle').setAttribute('aria-label', state.playing ? 'Pause motion' : 'Play motion'); });
 $('#clean-preview').addEventListener('click', () => { const clean = document.body.classList.toggle('clean-mode'); $('#clean-preview').setAttribute('aria-label', clean ? 'Back to editing' : 'Enter clean preview'); $('#clean-preview').innerHTML = clean ? '✕' : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg>'; resize(); });
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { openSheet(null); document.body.classList.remove('clean-mode'); resize(); } });
+$('#add-text').addEventListener('click', addText);
+$('#text-content').addEventListener('input', (event) => { const asset = selectedText(); if (!asset || state.exporting) return; asset.text = event.currentTarget.value; queueText(asset); });
+$$('[data-font]').forEach((button) => button.addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; asset.font = button.dataset.font; syncTextControls(); renderText(asset); }));
+$('#text-color').addEventListener('input', (event) => { const asset = selectedText(); if (!asset || state.exporting) return; asset.color = event.currentTarget.value; queueText(asset); });
+for (const [id, key] of [['text-size', 'scale'], ['text-height', 'height']]) {
+  $(`#${id}`).addEventListener('input', (event) => { const asset = selectedText(); if (!asset || state.exporting) return; const layer = asset.layers[0]; layer[key] = Number(event.currentTarget.value); layer.mesh.scale.setScalar(asset.size * state.scale * layer.scale); layer.mesh.position.y = state.pivotY + layer.height; });
+}
+$('#text-visibility').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; asset.layers[0].visible = !asset.layers[0].visible; addLayers(); });
+$('#delete-text').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; asset.layers[0].texture.dispose(); state.assets.splice(state.selectedAsset, 1); state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1)); addLayers(); });
+function fitViewport() {
+  document.documentElement.style.setProperty('--app-height', `${window.visualViewport?.height || window.innerHeight}px`);
+}
+window.visualViewport?.addEventListener('resize', fitViewport);
+fitViewport();
 new ResizeObserver(resize).observe($('.stage-wrap'));
 $('#export-btn').disabled = true;
 updateLayerList(); resize(); animate();
