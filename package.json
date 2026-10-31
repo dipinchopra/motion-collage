@@ -1,0 +1,21 @@
+{
+  "name": "kinetic-cutout-studio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.7.2",
+    "heic2any": "^0.0.4",
+    "mediabunny": "^1.55.6",
+    "three": "^0.178.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.0.0",
+    "vite": "^7.1.3"
+  }
+}
