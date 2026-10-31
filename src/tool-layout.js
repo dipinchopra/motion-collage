@@ -1,4 +1,7 @@
 export const TOOLS = {
+  brush: { label: 'brush', tuning: 'Brush', color: '#f2f0eb', accent: '#dfff00', font: 'Manrope' },
+  bend: { label: 'bend', tuning: 'Bend', color: '#9fb956', accent: '#b6e16a', font: 'Manrope' },
+  cutline: { label: 'cutline', tuning: 'Cutline', color: '#dba565', accent: '#ff6c7b', font: 'Mochiy Pop One' },
   motion: { label: 'motion', tuning: 'Spin', color: '#f1f0ed', accent: '#dfff00', font: 'Manrope' },
   orbit: { label: 'orbit', tuning: 'Orbit', color: '#dfe7e7', accent: '#b6c4ff', font: 'Manrope' },
   shutters: { label: 'shutters', tuning: 'Shutters', color: '#dfdfd8', accent: '#dfff00', font: 'Manrope' },

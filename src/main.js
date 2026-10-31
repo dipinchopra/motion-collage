@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { SUBJECT_TOOLS, resampleStrokes, demoStrokes, paintPose, bendPose } from './subject-brush.js';
 import { editorLayout, portraitSize } from './viewport-layout.js';
 import { TOOLS, toolTransform } from './tool-layout.js';
 import { MODEL_SIZE } from './segmentation-data.js';
@@ -156,7 +157,87 @@ function getMask(image) {
   });
 }
 
-const toolOptions = { orbit: { radius: 0.5, tilt: 0.6, speed: 1 }, echo: { copies: 4, spacing: 0.13, speed: 1 }, shutters: { bands: 6, fold: 1.4, speed: 1 }, ribbon: { rows: 2, slant: -0.12, speed: 1 }, stamp: { hits: 3, punch: 0.24, speed: 2 } };
+const toolOptions = { orbit: { radius: 0.5, tilt: 0.6, speed: 1 }, echo: { copies: 4, spacing: 0.13, speed: 1 }, shutters: { bands: 6, fold: 1.4, speed: 1 }, ribbon: { rows: 2, slant: -0.12, speed: 1 }, stamp: { hits: 3, punch: 0.24, speed: 2 }, brush: { size: 1, spacing: 0.022, turn: 0.18, speed: 1 }, bend: { copies: 24, bend: 0.65, depth: 0.25, speed: 1 }, cutline: { size: 1, edge: 18, color: '#ff6475', spacing: 0.024, turn: 0.1, speed: 1 } };
+const subjectState = { brush: { strokes: [], demo: true, samples: [] }, cutline: { strokes: [], demo: true, samples: [] } };
+const stampBudget = mobileDevice ? 64 : 96;
+let subjectPointer = null;
+let strokeFrame = 0;
+function sourceAsset() { return state.assets[state.selectedAsset] || state.assets[0]; }
+function sourceLayer(asset) { return asset?.layers.find((layer) => layer.kind === 'mask' && layer.visible) || asset?.layers.find((layer) => layer.visible) || asset?.layers[0]; }
+function refreshSubjectSamples() {
+  if (!subjectState[state.tool]) return;
+  const drawing = subjectState[state.tool];
+  drawing.strokes = drawing.strokes.filter((stroke) => state.assets.includes(stroke.asset));
+  const asset = sourceAsset();
+  const strokes = drawing.demo ? demoStrokes(state.tool, asset, sourceLayer(asset)) : drawing.strokes;
+  drawing.samples = resampleStrokes(strokes, toolOptions[state.tool].spacing, stampBudget);
+  $$(`[data-stroke-tool="${state.tool}"]`).forEach((button) => button.disabled = button.dataset.strokeAction === 'undo' ? !drawing.strokes.length : !drawing.strokes.length && !drawing.demo);
+}
+function subjectTexture(layer) {
+  if (state.tool !== 'cutline') return layer.texture;
+  const {color,edge} = toolOptions.cutline;
+  const key = `${layer.texture.uuid}/${color}/${edge}`;
+  if (layer.paperKey === key) return layer.paperTexture;
+  releaseTexture(layer.paperTexture);
+  const source = layer.texture.image;
+  const pad = Math.ceil(edge) + 2;
+  const matte = document.createElement('canvas'); matte.width = source.width; matte.height = source.height;
+  const mask = matte.getContext('2d'); mask.drawImage(source, 0, 0); mask.globalCompositeOperation = 'source-in'; mask.fillStyle = color; mask.fillRect(0, 0, matte.width, matte.height);
+  const surface = document.createElement('canvas'); surface.width = source.width + pad * 2; surface.height = source.height + pad * 2;
+  const context = surface.getContext('2d');
+  for (let i = 0; i < 24; i++) { const angle = i / 24 * Math.PI * 2; context.drawImage(matte, pad + Math.cos(angle) * edge, pad + Math.sin(angle) * edge); }
+  context.drawImage(source, pad, pad);
+  matte.width = matte.height = 1;
+  layer.paperKey = key; layer.paperTexture = textureFromCanvas(surface);
+  return layer.paperTexture;
+}
+function buildSubjectLayers() {
+  refreshSubjectSamples();
+  const asset = sourceAsset();
+  const selected = sourceLayer(asset);
+  const samples = subjectState[state.tool]?.samples || [];
+  const needed = new Set(samples.map((sample) => sample.layer));
+  if (selected) needed.add(selected);
+  state.assets.forEach((entry) => {
+    entry.axis = new THREE.Group(); pivot.add(entry.axis);
+    entry.layers.forEach((layer) => {
+      layer.instances = [];
+      if (!needed.has(layer)) { layer.mesh = null; return; }
+      const copies = state.tool === 'bend' ? toolOptions.bend.copies : stampBudget;
+      const geometry = layerGeometry(entry);
+      const map = subjectTexture(layer);
+      for (let i = 0; i < copies; i++) {
+        const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+        mesh.visible = false; entry.axis.add(mesh); layer.instances.push(mesh);
+      }
+      layer.mesh = layer.instances.at(-1);
+    });
+  });
+}
+function updateSubjectComposition(phase) {
+  pivot.position.set(0, 0, 0); pivot.rotation.set(0, 0, 0);
+  const groups = new Map();
+  const drawing = subjectState[state.tool];
+  if (drawing) drawing.samples.forEach((sample, index) => {
+    const pose = paintPose(sample, index, drawing.samples.length, phase, toolOptions[state.tool], subjectPointer !== null || state.tool === 'cutline' || motionCycles() === 0 || (!state.playing && !state.exporting));
+    if (state.tool === 'cutline' && subjectPointer === null) { pose.x += Math.sin(phase + index * 0.045) * 0.065; pose.y += Math.cos(phase + index * 0.04) * 0.045; pose.rz += Math.sin(phase + index * 0.035) * 0.12; }
+    const list = groups.get(sample.layer) || []; list.push({pose,index}); groups.set(sample.layer,list);
+  });
+  const selected = sourceLayer(sourceAsset());
+  state.assets.forEach((entry) => entry.layers.forEach((layer) => {
+    layer.instances.forEach((mesh, i) => {
+      const item = state.tool === 'bend' && layer === selected ? {pose:bendPose(i,layer.instances.length,phase,toolOptions.bend),index:i} : groups.get(layer)?.[i];
+      if (!item) { mesh.visible = false; return; }
+      const {pose,index} = item;
+      mesh.position.set(pose.x, pose.y, pose.z);
+      mesh.rotation.set(pose.rx,pose.ry,pose.rz+layer.angle);
+      mesh.scale.setScalar(entry.size * layer.scale * pose.scale);
+      mesh.material.opacity = pose.opacity; mesh.renderOrder = index;
+      mesh.visible = layer.visible && pose.opacity > 0.001;
+    });
+  }));
+}
+
 function motionCycles() { return state.tool === 'motion' ? state.speed : toolOptions[state.tool].speed; }
 function layerGeometry(asset, band = 0, bands = 1) {
   const aspect = asset.image.width / asset.image.height;
@@ -169,6 +250,7 @@ function layerGeometry(asset, band = 0, bands = 1) {
     uv.needsUpdate = true;
   }
   geometry.userData.bandOffset = height * (0.5 - (band + 0.5) / bands);
+  if (state.tool === 'bend') geometry.translate(0, height / 2, 0);
   return geometry;
 }
 function refreshLayerGeometry(asset, layer) {
@@ -177,7 +259,7 @@ function refreshLayerGeometry(asset, layer) {
   const shared = bands === 1 ? layerGeometry(asset) : null;
   layer.instances.forEach((mesh, index) => {
     mesh.geometry = shared || layerGeometry(asset, index, bands);
-    mesh.material.map = layer.texture;
+    mesh.material.map = subjectTexture(layer);
     mesh.material.needsUpdate = true;
   });
   old.forEach((geometry) => geometry.dispose());
@@ -195,6 +277,7 @@ function addLayers() {
   geometries.forEach((geometry) => geometry.dispose());
   materials.forEach((material) => material.dispose());
   pivot.clear();
+  if (SUBJECT_TOOLS.has(state.tool)) { buildSubjectLayers(); updateComposition(); updateLayerList(); return; }
   state.assets.forEach((asset, assetIndex) => {
     const axis = new THREE.Group();
     pivot.add(axis);
@@ -219,6 +302,7 @@ function addLayers() {
 }
 
 function updateComposition(phase = state.turntableAngle) {
+  if (SUBJECT_TOOLS.has(state.tool)) { updateSubjectComposition(phase); return; }
   // One rigid assembly: animation belongs to the parent, not its wings.
   pivot.rotation.set(0, state.tool === 'motion' ? phase : 0, 0);
   pivot.position.set(state.tool === 'motion' ? state.positionX : 0, state.tool === 'motion' ? state.positionY : 0, 0);
@@ -331,7 +415,7 @@ async function addText() {
   $('#text-content').select();
   const rendered = await queueText(asset);
   if (!rendered && asset.revision === 1 && state.assets.includes(asset)) {
-    releaseTexture(asset.layers[0].texture);
+    releaseTexture(asset.layers[0].texture); releaseTexture(asset.layers[0].paperTexture);
     state.assets.splice(state.assets.indexOf(asset), 1);
     addLayers();
   }
@@ -346,6 +430,7 @@ function selectedSticker() {
   return asset?.kind === 'sticker' ? asset : null;
 }
 function detachStickers(asset) {
+  Object.values(subjectState).forEach((drawing) => { drawing.strokes = drawing.strokes.filter((stroke) => stroke.asset !== asset); });
   state.assets.forEach((entry) => { if (entry.host === asset) entry.host = null; });
 }
 function syncStickerControls() {
@@ -419,7 +504,7 @@ function updateLayerList() {
   const focused = editor.contains(document.activeElement) ? { index: document.activeElement.dataset.layerIndex, action: document.activeElement.dataset.layerAction } : null;
   $('#selected-caption').textContent = asset ? `Photo ${state.selectedAsset + 1}` : 'Select a photo above';
   editor.innerHTML = asset ? `<div class="layer-options" role="group" aria-label="Image layers">${asset.layers.map((layer, index) => `<button class="layer-option ${layer.visible ? 'on' : ''}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="visibility" aria-pressed="${layer.visible}"><img src="${layerThumbnail(layer)}" alt=""><span>${layerName(layer)}</span><i>${layer.visible ? '✓' : '+'}</i></button>`).join('')}</div>${asset.layers.map((layer, index) => `<div class="layer-detail ${layer.visible ? '' : 'inactive'}" data-layer-detail="${index}"><div class="layer-detail-head"><span>${layerName(layer)}</span><div><button aria-label="Move ${layerName(layer).toLowerCase()} backward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="back">↓</button><button aria-label="Move ${layerName(layer).toLowerCase()} forward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="forward">↑</button></div></div><div class="mask-controls">${[['height','Height',-0.8,0.8],['angle','Tilt',-1.2,1.2],['scale','Size',0.4,1.4]].map(([key,label,min,max]) => `<label>${label}<input aria-label="${layerName(layer)} ${label.toLowerCase()}" type="range" min="${min}" max="${max}" step="0.01" value="${layer[key]}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="${key}"></label>`).join('')}</div></div>`).join('')}<button class="delete-photo" data-asset-index="${state.selectedAsset}" data-layer-action="delete">Remove photo</button>` : '<p class="no-selection">Add a photo to start editing.</p>';
-  list.querySelectorAll('[data-select-asset]').forEach((button) => button.addEventListener('click', () => { state.selectedAsset = Number(button.dataset.selectAsset); updateLayerList(); openSheet(state.assets[state.selectedAsset].kind === 'text' ? 'text' : state.assets[state.selectedAsset].kind === 'sticker' ? 'stickers' : 'cutouts'); }));
+  list.querySelectorAll('[data-select-asset]').forEach((button) => button.addEventListener('click', () => { state.selectedAsset = Number(button.dataset.selectAsset); if (SUBJECT_TOOLS.has(state.tool)) { addLayers(); openSheet('motion'); return; } updateLayerList(); openSheet(state.assets[state.selectedAsset].kind === 'text' ? 'text' : state.assets[state.selectedAsset].kind === 'sticker' ? 'stickers' : 'cutouts'); }));
   $('#asset-meta').textContent = `${photoCount()} / 5`;
   $('#upload-trigger').disabled = photoCount() >= 5;
   $('#export-btn').disabled = !state.assets.length || backgroundLoading || state.exporting;
@@ -448,7 +533,7 @@ function updateLayerList() {
   editor.querySelectorAll('[data-layer-action="delete"]').forEach((button) => button.addEventListener('click', (event) => {
     const index = Number(event.currentTarget.dataset.assetIndex);
     const asset = state.assets[index];
-    asset.layers.forEach((layer) => releaseTexture(layer.texture));
+    asset.layers.forEach((layer) => { releaseTexture(layer.texture); releaseTexture(layer.paperTexture); });
     asset.image.width = asset.image.height = 1;
     detachStickers(asset);
     state.assets.splice(index, 1);
@@ -541,7 +626,7 @@ function setCanvasColor(color) {
   $('.stage-wrap').style.setProperty('--canvas-color', color);
 }
 
-const toolBackdrops = { motion: { color: '#f1f0ed' }, orbit: { preset: 'plaid' }, echo: { color: '#ffc9dd' }, shutters: { preset: 'burgundy' }, ribbon: { color: '#f1e8d4' }, stamp: { preset: 'plaid' } };
+const toolBackdrops = { motion: { color: '#f1f0ed' }, orbit: { preset: 'plaid' }, echo: { color: '#ffc9dd' }, shutters: { preset: 'burgundy' }, ribbon: { color: '#f1e8d4' }, stamp: { preset: 'plaid' }, brush: { color: '#f2f0eb' }, bend: { color: '#9fb956' }, cutline: { color: '#dba565' } };
 let backgroundRequest = 0;
 let backgroundLoading = false;
 
@@ -743,7 +828,7 @@ for (const [id, key] of [['text-size', 'scale'], ['text-height', 'height']]) {
   $(`#${id}`).addEventListener('input', (event) => { const asset = selectedText(); if (!asset || state.exporting) return; const layer = asset.layers[0]; layer[key] = Number(event.currentTarget.value); updateComposition(); });
 }
 $('#text-visibility').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; asset.layers[0].visible = !asset.layers[0].visible; addLayers(); });
-$('#delete-text').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; releaseTexture(asset.layers[0].texture); detachStickers(asset); state.assets.splice(state.selectedAsset, 1); state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1)); addLayers(); });
+$('#delete-text').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; releaseTexture(asset.layers[0].texture); releaseTexture(asset.layers[0].paperTexture); detachStickers(asset); state.assets.splice(state.selectedAsset, 1); state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1)); addLayers(); });
 const stickerPresets = [
   ['blue-scribble', 'Blue scribble'], ['orange-star', 'Orange paper star'], ['pink-scribble', 'Pink scribble'],
   ['music-notes', 'Music notes'], ['mint-star', 'Mint paper star'], ['blue-paper', 'Blue torn paper'], ['red-heart', 'Red paper heart'],
@@ -756,7 +841,7 @@ for (const key of ['scale', 'angle', 'x', 'height']) {
   $(`#sticker-${key}`).addEventListener('input', (event) => { const asset = selectedSticker(); if (!asset || state.exporting) return; asset.layers[0][key] = Number(event.currentTarget.value); updateComposition(); });
 }
 $('#sticker-visibility').addEventListener('click', () => { const asset = selectedSticker(); if (!asset || state.exporting) return; asset.layers[0].visible = !asset.layers[0].visible; addLayers(); });
-$('#delete-sticker').addEventListener('click', () => { const asset = selectedSticker(); if (!asset || state.exporting) return; releaseTexture(asset.layers[0].texture); state.assets.splice(state.selectedAsset, 1); state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1)); addLayers(); });
+$('#delete-sticker').addEventListener('click', () => { const asset = selectedSticker(); if (!asset || state.exporting) return; releaseTexture(asset.layers[0].texture); releaseTexture(asset.layers[0].paperTexture); detachStickers(asset); state.assets.splice(state.selectedAsset, 1); state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1)); addLayers(); });
 function setToolMenu(open, focus = false) {
   $('#tool-menu').hidden = !open;
   $('#tool-trigger').setAttribute('aria-expanded', String(open));
@@ -766,6 +851,7 @@ async function selectTool(name) {
   if (!TOOLS[name] || state.exporting || uploading) return;
   if (state.tool === name) { setToolMenu(false, true); return; }
   const backdrop = { ...toolBackdrops[name] };
+  if (state.tool === 'cutline' && name !== 'cutline') state.assets.forEach((asset) => asset.layers.forEach((layer) => { releaseTexture(layer.paperTexture); layer.paperTexture = null; layer.paperKey = null; }));
   state.tool = name;
   state.turntableAngle = 0;
   setToolMenu(false, true);
@@ -802,9 +888,56 @@ $('#tool-menu').addEventListener('keydown', (event) => {
   if (['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); const items = [...$$('[data-tool]')]; const index = items.indexOf(document.activeElement); items[(index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus(); }
 });
 document.addEventListener('pointerdown', (event) => { if (!$('.tool-switcher').contains(event.target)) setToolMenu(false); });
-for (const [tool, keys] of [['orbit', ['radius', 'tilt', 'speed']], ['echo', ['copies', 'spacing', 'speed']], ['shutters', ['bands', 'fold', 'speed']], ['ribbon', ['rows', 'slant', 'speed']], ['stamp', ['hits', 'punch', 'speed']]]) {
-  for (const key of keys) $(`#${tool}-${key}`).addEventListener('input', (event) => { if (state.exporting) return; toolOptions[tool][key] = Number(event.currentTarget.value); if (['copies', 'bands', 'rows', 'hits'].includes(key)) addLayers(); else updateComposition(); });
+for (const [tool, keys] of [['orbit', ['radius', 'tilt', 'speed']], ['echo', ['copies', 'spacing', 'speed']], ['shutters', ['bands', 'fold', 'speed']], ['ribbon', ['rows', 'slant', 'speed']], ['stamp', ['hits', 'punch', 'speed']], ['brush', ['size', 'spacing', 'turn', 'speed']], ['bend', ['copies', 'bend', 'depth', 'speed']], ['cutline', ['size', 'edge', 'speed']]]) {
+  for (const key of keys) $(`#${tool}-${key}`).addEventListener('input', (event) => { if (state.exporting) return; toolOptions[tool][key] = Number(event.currentTarget.value); if (['copies', 'bands', 'rows', 'hits'].includes(key)) addLayers(); else {
+    if (subjectState[state.tool] && key === 'spacing') refreshSubjectSamples();
+    if (state.tool === 'cutline' && key === 'edge') state.assets.forEach((asset) => asset.layers.forEach((layer) => { if (layer.instances.length) { const map = subjectTexture(layer); layer.instances.forEach((mesh) => { mesh.material.map = map; mesh.material.needsUpdate = true; }); } }));
+    updateComposition();
+  } });
 }
+$('#cutline-color').addEventListener('input', (event) => {
+  toolOptions.cutline.color = event.currentTarget.value;
+  state.assets.forEach((asset) => asset.layers.forEach((layer) => { if (layer.instances.length) { const map = subjectTexture(layer); layer.instances.forEach((mesh) => { mesh.material.map = map; mesh.material.needsUpdate = true; }); } }));
+});
+function paintPoint(event) { const rect = canvas.getBoundingClientRect(); return {x:Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width)),y:Math.max(0,Math.min(1,(event.clientY-rect.top)/rect.height))}; }
+canvas.addEventListener('pointerdown', (event) => {
+  if (!SUBJECT_TOOLS.has(state.tool) || state.exporting || subjectPointer !== null || !sourceAsset()) return;
+  event.preventDefault(); subjectPointer = event.pointerId; canvas.setPointerCapture(event.pointerId);
+  if (subjectState[state.tool]) {
+    const drawing = subjectState[state.tool];
+    if (drawing.strokes.length >= 24) { $(`#${state.tool}-status`).textContent = 'Undo or clear a stroke to keep painting.'; subjectPointer = null; return; }
+    drawing.demo = false; drawing.strokes.push({asset:sourceAsset(),layer:sourceLayer(sourceAsset()),points:[paintPoint(event)]});
+    addLayers();
+  }
+});
+canvas.addEventListener('pointermove', (event) => {
+  if (event.pointerId !== subjectPointer || !SUBJECT_TOOLS.has(state.tool)) return;
+  const point = paintPoint(event);
+  if (state.tool === 'bend') {
+    toolOptions.bend.bend = (point.x-.5)*2.4; toolOptions.bend.depth = (1-point.y)*.6;
+    $('#bend-bend').value = toolOptions.bend.bend; $('#bend-depth').value = toolOptions.bend.depth;
+    updateComposition(); return;
+  }
+  const stroke = subjectState[state.tool].strokes.at(-1);
+  const previous = stroke.points.at(-1);
+  if (Math.hypot(point.x-previous.x,point.y-previous.y)<.003) return;
+  stroke.points.push(point);
+  if (stroke.points.length > 512) stroke.points = stroke.points.filter((_,index) => index===0 || index%2===1);
+  cancelAnimationFrame(strokeFrame); strokeFrame = requestAnimationFrame(() => { refreshSubjectSamples(); updateComposition(); });
+});
+function endPaint(event) {
+  if (event.pointerId !== subjectPointer) return;
+  cancelAnimationFrame(strokeFrame); subjectPointer = null;
+  if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  if (subjectState[state.tool]) { refreshSubjectSamples(); state.turntableAngle = 0; updateComposition(); }
+}
+canvas.addEventListener('pointerup', endPaint); canvas.addEventListener('pointercancel', endPaint); canvas.addEventListener('lostpointercapture', endPaint);
+$$('[data-stroke-action]').forEach((button) => button.addEventListener('click', () => {
+  const drawing = subjectState[button.dataset.strokeTool]; if (!drawing || state.exporting) return;
+  drawing.demo = false;
+  if (button.dataset.strokeAction === 'undo') drawing.strokes.pop(); else drawing.strokes = [];
+  $(`#${button.dataset.strokeTool}-status`).textContent = ''; state.turntableAngle = 0; addLayers();
+}));
 let viewportFrame = 0;
 function fitViewport() {
   const viewport = window.visualViewport;
