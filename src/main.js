@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { MODEL_SIZE } from './segmentation-data.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Output, MovOutputFormat, BufferTarget, CanvasSource } from 'mediabunny';
 import './style.css';
@@ -109,10 +110,10 @@ function drawTexture(image, mask, inverted = false) {
 let segmentationWorker = null;
 let segmentationId = 0;
 let segmentationJob = null;
-function releaseSegmenter() {
+function releaseSegmenter(reason = 'Background removal stopped. Try again.') {
   segmentationWorker?.terminate();
   segmentationWorker = null;
-  if (segmentationJob) { clearTimeout(segmentationJob.timer); segmentationJob.reject(new Error('Background removal stopped. Try again.')); segmentationJob = null; }
+  if (segmentationJob) { clearTimeout(segmentationJob.timer); segmentationJob.reject(new Error(reason)); segmentationJob = null; }
 }
 function getMask(image) {
   if (!segmentationWorker) {
@@ -128,15 +129,21 @@ function getMask(image) {
         else { job.reject(new Error(data.message)); releaseSegmenter(); }
       }
     };
-    segmentationWorker.onerror = () => releaseSegmenter();
-    segmentationWorker.onmessageerror = () => releaseSegmenter();
+    segmentationWorker.onerror = (event) => { event.preventDefault(); releaseSegmenter(event.message || 'The background-removal worker could not start'); };
+    segmentationWorker.onmessageerror = () => releaseSegmenter('The cutout response could not be read');
   }
-  const pixels = image.getContext('2d').getImageData(0, 0, image.width, image.height).data;
+  // Resize with the page's canvas API; Safari workers need no OffscreenCanvas.
+  const input = document.createElement('canvas');
+  input.width = input.height = MODEL_SIZE;
+  const context = input.getContext('2d');
+  context.drawImage(image, 0, 0, MODEL_SIZE, MODEL_SIZE);
+  const pixels = context.getImageData(0, 0, MODEL_SIZE, MODEL_SIZE).data;
+  input.width = input.height = 1;
   return new Promise((resolve, reject) => {
     const id = ++segmentationId;
     segmentationJob = { id, resolve, reject, timer: setTimeout(releaseSegmenter, 180_000) };
-    try { segmentationWorker.postMessage({ id, pixels, width: image.width, height: image.height, mobile: mobileDevice }, [pixels.buffer]); }
-    catch (error) { releaseSegmenter(); }
+    try { segmentationWorker.postMessage({ id, pixels, width: MODEL_SIZE, height: MODEL_SIZE }, [pixels.buffer]); }
+    catch (error) { releaseSegmenter(error.message || 'Could not start background removal'); }
   });
 }
 
@@ -497,7 +504,7 @@ const handleUpload = async (files) => {
   $('#empty-upload').disabled = true;
   const incoming = Array.from(files || []).filter(isSupportedImage).slice(0, 5 - photoCount());
   try {
-    for (const file of incoming) await segmentImage(file).catch((error) => { console.error(error); $('#model-status').textContent = 'Could not create cutout. Try another photo.'; });
+    for (const file of incoming) await segmentImage(file).catch((error) => { console.error(error); $('#model-status').textContent = `Cutout failed: ${(error.message || String(error)).slice(0, 240)}`; $('#model-progress').classList.add('visible'); });
   } finally { releaseSegmenter(); uploading = false; $('#upload-trigger').setAttribute('aria-busy', 'false'); $('#upload').value = ''; $('#upload-trigger').disabled = photoCount() >= 5; $('#empty-upload').disabled = false; }
 };
 $('#upload').addEventListener('change', (event) => handleUpload(event.target.files));
