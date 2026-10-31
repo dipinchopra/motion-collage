@@ -3,6 +3,10 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { pipeline, env } from '@huggingface/transformers';
 import { Output, MovOutputFormat, BufferTarget, CanvasSource } from 'mediabunny';
 import './style.css';
+import orangeTiles from '../background/ -5.jpg';
+import burgundyTiles from '../background/ -6.jpg';
+import redTiles from '../background/ -7.jpg';
+import bluePlaid from '../background/ -8.jpg';
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -209,7 +213,7 @@ function updateLayerList() {
   list.querySelectorAll('[data-select-asset]').forEach((button) => button.addEventListener('click', () => { state.selectedAsset = Number(button.dataset.selectAsset); updateLayerList(); openSheet(state.assets[state.selectedAsset].kind === 'text' ? 'text' : 'cutouts'); }));
   $('#asset-meta').textContent = `${photoCount()} / 5`;
   $('#upload-trigger').disabled = photoCount() >= 5;
-  $('#export-btn').disabled = !state.assets.length;
+  $('#export-btn').disabled = !state.assets.length || backgroundLoading || state.exporting;
   editor.querySelectorAll('[data-layer-index]').forEach((input) => input.addEventListener(input.tagName === 'BUTTON' ? 'click' : 'input', (event) => {
     const asset = state.assets[Number(event.currentTarget.dataset.assetIndex)];
     const layer = asset.layers[Number(event.currentTarget.dataset.layerIndex)];
@@ -324,7 +328,14 @@ function setCanvasColor(color) {
   $('.stage-wrap').style.setProperty('--canvas-color', color);
 }
 
+let backgroundRequest = 0;
+let backgroundLoading = false;
+
 function clearBackgroundImage() {
+  backgroundRequest++;
+  backgroundLoading = false;
+  $('#export-btn').disabled = !state.assets.length || state.exporting;
+  $$('[data-background]').forEach((button) => { button.classList.remove('selected'); button.setAttribute('aria-pressed', 'false'); });
   if (state.backgroundTexture) state.backgroundTexture.dispose();
   if (state.backgroundBitmap) state.backgroundBitmap.close();
   state.backgroundTexture = null;
@@ -335,11 +346,17 @@ function clearBackgroundImage() {
   $('#background-image').value = '';
 }
 
-async function setBackgroundImage(file) {
+async function setBackgroundImage(file, preset = null, request = ++backgroundRequest) {
+  if (state.exporting) return;
+  backgroundLoading = true;
+  $('#export-btn').disabled = true;
+  $('#background-image-meta').textContent = 'Loading background…';
+  try {
   const preparedFile = await prepareImageFile(file);
   // ImageBitmap textures bypass Three.js's texture.flipY handling, so orient
   // the pixels for WebGL while decoding them.
   const bitmap = await createImageBitmap(preparedFile, { imageOrientation: 'flipY' });
+  if (request !== backgroundRequest) { bitmap.close(); return; }
   if (state.backgroundTexture) state.backgroundTexture.dispose();
   if (state.backgroundBitmap) state.backgroundBitmap.close();
   const texture = new THREE.Texture(bitmap);
@@ -348,12 +365,20 @@ async function setBackgroundImage(file) {
   state.backgroundBitmap = bitmap;
   state.backgroundTexture = texture;
   scene.background = texture;
-  $('#background-image-meta').textContent = file.name.toUpperCase();
+  $('#background-image-meta').textContent = preset?.label || file.name;
   $('#background-image-clear').classList.add('visible');
+  $$('[data-background]').forEach((button) => { const active = button.dataset.background === preset?.id; button.classList.toggle('selected', active); button.setAttribute('aria-pressed', String(active)); });
+  $$('[data-color]').forEach((button) => button.classList.remove('selected'));
+  } catch (error) {
+    if (request === backgroundRequest) $('#background-image-meta').textContent = 'Could not load background. Try again.';
+    console.error(error);
+  } finally {
+    if (request === backgroundRequest) { backgroundLoading = false; $('#export-btn').disabled = !state.assets.length || state.exporting; }
+  }
 }
 
 async function exportLoop() {
-  if (!state.assets.length || state.exporting || uploading) return;
+  if (!state.assets.length || state.exporting || uploading || backgroundLoading) return;
   state.exporting = true; $('.bottom-dock').classList.add('recording'); $('#share-trigger').disabled = true; $('#export-btn').disabled = true; $('#export-progress').classList.add('visible'); $('#export-status').textContent = 'EXPORTING LOOP...';
   await Promise.all(state.assets.filter((asset) => asset.kind === 'text').map((asset) => asset.pending));
   const width = 1080, height = 1920, fps = 60, frames = 600;
@@ -418,7 +443,32 @@ $('#upload-trigger').addEventListener('dragleave', () => $('#upload-trigger').cl
 $('#upload-trigger').addEventListener('drop', (event) => { event.preventDefault(); $('#upload-trigger').classList.remove('dragging'); handleUpload(event.dataTransfer.files); });
 $$('#speed, #depth, #scale, #pivot-y, #position-x, #position-y').forEach((input) => input.addEventListener('input', syncControls));
 $('#speed').addEventListener('input', () => $$('[data-speed]').forEach((button) => button.classList.toggle('selected', Number(button.dataset.speed) === state.speed)));
-$('#canvas-color').addEventListener('input', (event) => setCanvasColor(event.target.value));
+$('#canvas-color').addEventListener('input', (event) => { clearBackgroundImage(); setCanvasColor(event.target.value); });
+const backgroundPresets = [
+  { id: 'orange', label: 'Orange mosaic', url: orangeTiles },
+  { id: 'burgundy', label: 'Burgundy tiles', url: burgundyTiles },
+  { id: 'red', label: 'Red tiles', url: redTiles },
+  { id: 'plaid', label: 'Blue plaid', url: bluePlaid },
+];
+$('#background-presets').innerHTML = backgroundPresets.map((preset) => `<button data-background="${preset.id}" aria-label="${preset.label} background" aria-pressed="false"><img src="${preset.url}" alt="" loading="lazy"><span>${preset.label}</span></button>`).join('');
+$$('[data-background]').forEach((button) => button.addEventListener('click', async () => {
+  if (state.exporting) return;
+  const preset = backgroundPresets.find((item) => item.id === button.dataset.background);
+  const request = ++backgroundRequest;
+  backgroundLoading = true;
+  $('#export-btn').disabled = true;
+  $('#background-image-meta').textContent = 'Loading background…';
+  try {
+    const response = await fetch(preset.url);
+    if (!response.ok) throw new Error('Background unavailable');
+    const blob = await response.blob();
+    if (request !== backgroundRequest) return;
+    await setBackgroundImage(new File([blob], `${preset.label}.jpg`, { type: 'image/jpeg' }), preset, request);
+  } catch (error) {
+    console.error(error);
+    if (request === backgroundRequest) { backgroundLoading = false; $('#export-btn').disabled = !state.assets.length; $('#background-image-meta').textContent = 'Could not load background. Try again.'; }
+  }
+}));
 $('#background-image-trigger').addEventListener('click', () => $('#background-image').click());
 $('#background-image').addEventListener('change', (event) => {
   const file = Array.from(event.target.files || []).find(isSupportedImage);
