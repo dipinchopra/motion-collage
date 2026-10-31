@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { TOOLS, toolTransform } from './tool-layout.js';
 import { MODEL_SIZE } from './segmentation-data.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Output, MovOutputFormat, BufferTarget, CanvasSource } from 'mediabunny';
@@ -36,7 +37,7 @@ const key = new THREE.DirectionalLight('#ffcf91', 3.5); key.position.set(-3, 4, 
 const fill = new THREE.DirectionalLight('#75d8d0', 2); fill.position.set(4, -2, 2); scene.add(fill);
 
 const photoCount = () => state.assets.filter((asset) => asset.kind !== 'text').length;
-const state = { assets: [], mode: 'standard', speed: 0.55, direction: 1, depth: 0.7, scale: 1, pivotY: 0, positionX: 0, positionY: 0, canvasColor: '#f1f0ed', backgroundTexture: null, backgroundBitmap: null, exporting: false, frame: 0, turntableAngle: 0, nextLayerOrder: 0, selectedAsset: 0, playing: true };
+const state = { assets: [], tool: 'motion', mode: 'standard', speed: 0.55, direction: 1, depth: 0.7, scale: 1, pivotY: 0, positionX: 0, positionY: 0, canvasColor: '#f1f0ed', backgroundTexture: null, backgroundBitmap: null, exporting: false, frame: 0, turntableAngle: 0, nextLayerOrder: 0, selectedAsset: 0, playing: true };
 
 function resize() {
   const rect = canvas.getBoundingClientRect();
@@ -147,31 +148,59 @@ function getMask(image) {
   });
 }
 
+const toolOptions = { poster: { spread: 0.5, tilt: 0.15, scale: 1 }, echo: { copies: 4, spacing: 0.13, speed: 0.45 } };
 function addLayers() {
-  pivot.traverse((object) => { if (object.isMesh) { object.geometry.dispose(); object.material.dispose(); } });
+  const geometries = new Set();
+  const materials = new Set();
+  pivot.traverse((object) => { if (object.isMesh) { geometries.add(object.geometry); materials.add(object.material); } });
+  geometries.forEach((geometry) => geometry.dispose());
+  materials.forEach((material) => material.dispose());
   pivot.clear();
-  state.assets.forEach((asset, assetIndex) => {
+  state.assets.forEach((asset) => {
     const axis = new THREE.Group();
-    // Every image plane passes through the same vertical center line.
-    axis.position.set(0, 0, 0);
     pivot.add(axis);
     asset.axis = axis;
-    axis.rotation.y = state.turntableAngle + assetIndex * state.depth;
     const aspect = asset.image.width / asset.image.height;
     asset.layers.forEach((layer) => {
-      const material = new THREE.MeshBasicMaterial({ map: layer.texture, transparent: true, side: THREE.DoubleSide, depthWrite: false, color: 0xffffff });
-      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(asset.kind === 'text' ? 2.1 : Math.min(aspect, 1.4) * 2.1, asset.kind === 'text' ? 2.1 / aspect : 2.1), material);
-      mesh.position.set(0, state.pivotY + layer.height, 0);
-      mesh.rotation.y = 0;
-      mesh.rotation.z = layer.angle;
-      mesh.scale.setScalar(asset.size * state.scale * layer.scale);
-      mesh.visible = layer.visible;
-      mesh.renderOrder = layer.order;
-      axis.add(mesh);
-      layer.mesh = mesh;
+      const geometry = new THREE.PlaneGeometry(asset.kind === 'text' ? 2.1 : Math.min(aspect, 1.4) * 2.1, asset.kind === 'text' ? 2.1 / aspect : 2.1);
+      const copies = state.tool === 'echo' && asset.kind !== 'text' ? toolOptions.echo.copies : 1;
+      layer.instances = [];
+      for (let copy = 0; copy < copies; copy++) {
+        const material = new THREE.MeshBasicMaterial({ map: layer.texture, transparent: true, side: THREE.DoubleSide, depthWrite: false, color: state.tool === 'echo' && copy < copies - 1 ? '#ed8c98' : '#ffffff' });
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.renderOrder = layer.order * 6 + copy;
+        axis.add(mesh);
+        layer.instances.push(mesh);
+      }
+      layer.mesh = layer.instances.at(-1);
     });
   });
+  updateComposition();
   updateLayerList();
+}
+
+function updateComposition(phase = state.turntableAngle) {
+  const photos = state.assets.filter((asset) => asset.kind !== 'text');
+  const texts = state.assets.filter((asset) => asset.kind === 'text');
+  pivot.position.set(state.tool === 'motion' ? state.positionX : 0, state.tool === 'motion' ? state.positionY : 0, 0);
+  state.assets.forEach((asset, assetIndex) => {
+    const text = asset.kind === 'text';
+    const index = state.tool === 'motion' ? assetIndex : (text ? texts : photos).indexOf(asset);
+    const count = text ? texts.length : photos.length;
+    asset.axis.position.set(0, 0, 0);
+    asset.axis.rotation.set(0, 0, 0);
+    asset.layers.forEach((layer) => {
+      layer.instances.forEach((mesh, copy) => {
+        const transform = toolTransform(state.tool, { index, count, text, phase, depth: state.depth, ...toolOptions.poster, ...toolOptions.echo, copy, copies: layer.instances.length });
+        if (state.tool === 'motion') asset.axis.rotation.y = transform.ry;
+        mesh.position.set(transform.x, transform.y + layer.height + (state.tool === 'motion' ? state.pivotY : 0), transform.z);
+        mesh.rotation.set(0, 0, transform.rz + layer.angle);
+        mesh.scale.setScalar(asset.size * layer.scale * transform.scale * (state.tool === 'motion' ? state.scale : state.tool === 'poster' ? toolOptions.poster.scale : 1));
+        mesh.material.opacity = transform.opacity;
+        mesh.visible = layer.visible;
+      });
+    });
+  });
 }
 
 function selectedText() {
@@ -242,6 +271,7 @@ async function renderText(asset) {
   releaseTexture(previous);
   const thumbnail = $(`[data-select-asset="${state.assets.indexOf(asset)}"] img`);
   if (thumbnail) thumbnail.src = asset.cutoutUrl;
+  updateComposition();
   return true;
 }
 
@@ -254,7 +284,7 @@ async function addText() {
   if (state.exporting || state.assets.filter((asset) => asset.kind === 'text').length >= 10) return;
   const placeholder = document.createElement('canvas');
   placeholder.width = 1024; placeholder.height = 180;
-  const asset = { image: placeholder, cutoutUrl: placeholder.toDataURL(), kind: 'text', text: 'Your text', font: 'Manrope', color: '#171717', size: 1, layers: [{ texture: new THREE.CanvasTexture(placeholder), kind: 'text', visible: true, height: 0, angle: 0, scale: 1, order: state.nextLayerOrder++ }] };
+  const asset = { image: placeholder, cutoutUrl: placeholder.toDataURL(), kind: 'text', text: 'Your text', font: TOOLS[state.tool].font, color: '#171717', size: 1, layers: [{ texture: new THREE.CanvasTexture(placeholder), kind: 'text', visible: true, height: 0, angle: 0, scale: 1, order: state.nextLayerOrder++ }] };
   state.assets.push(asset);
   state.selectedAsset = state.assets.length - 1;
   addLayers();
@@ -302,11 +332,7 @@ function updateLayerList() {
       if (neighbor) [layer.order, neighbor.order] = [neighbor.order, layer.order];
     }
     if (['forward', 'back', 'visibility'].includes(event.currentTarget.dataset.layerAction)) addLayers();
-    else if (layer.mesh) {
-      layer.mesh.position.y = state.pivotY + layer.height;
-      layer.mesh.rotation.z = layer.angle;
-      layer.mesh.scale.setScalar(asset.size * state.scale * layer.scale);
-    }
+    else updateComposition();
   }));
   editor.querySelectorAll('[data-layer-action="delete"]').forEach((button) => button.addEventListener('click', (event) => {
     const index = Number(event.currentTarget.dataset.assetIndex);
@@ -384,14 +410,7 @@ function syncControls() {
   state.positionX = Number($('#position-x').value);
   state.positionY = Number($('#position-y').value);
   pivot.position.set(state.positionX, state.positionY, 0);
-  state.assets.forEach((asset, index) => {
-    asset.axis.rotation.y = state.turntableAngle + index * state.depth;
-    asset.layers.forEach((layer) => {
-      layer.mesh.position.set(0, state.pivotY + layer.height, 0);
-      layer.mesh.scale.setScalar(asset.size * state.scale * layer.scale);
-      layer.mesh.rotation.set(0, 0, layer.angle);
-    });
-  });
+  updateComposition();
   for (const [id, value] of [['speed', state.speed], ['depth', state.depth], ['scale', state.scale], ['pivot-y', state.pivotY], ['position-x', state.positionX], ['position-y', state.positionY]]) {
     $(`#${id}-value`).textContent = `${value.toFixed(2)}${id === 'speed' ? '×' : ''}`;
   }
@@ -399,16 +418,19 @@ function syncControls() {
 
 function setCanvasColor(color) {
   state.canvasColor = color;
+  toolBackdrops[state.tool] = { color };
   if (!state.backgroundTexture) scene.background = new THREE.Color(color);
   $('.stage-wrap').style.setProperty('--canvas-color', color);
 }
 
+const toolBackdrops = { motion: { color: '#f1f0ed' }, poster: { preset: 'plaid' }, echo: { color: '#ffc9dd' } };
 let backgroundRequest = 0;
 let backgroundLoading = false;
 
 function clearBackgroundImage() {
   backgroundRequest++;
   backgroundLoading = false;
+  toolBackdrops[state.tool] = { color: state.canvasColor };
   $('#export-btn').disabled = !state.assets.length || state.exporting;
   $$('[data-background]').forEach((button) => { button.classList.remove('selected'); button.setAttribute('aria-pressed', 'false'); });
   if (state.backgroundTexture) state.backgroundTexture.dispose();
@@ -436,6 +458,7 @@ async function setBackgroundImage(file, preset = null, request = ++backgroundReq
   state.backgroundBitmap = bitmap;
   state.backgroundTexture = texture;
   scene.background = texture;
+  toolBackdrops[state.tool] = preset ? { preset: preset.id } : { file };
   $('#background-image-meta').textContent = preset?.label || file.name;
   $('#background-image-clear').classList.add('visible');
   $$('[data-background]').forEach((button) => { const active = button.dataset.background === preset?.id; button.classList.toggle('selected', active); button.setAttribute('aria-pressed', String(active)); });
@@ -449,10 +472,11 @@ async function setBackgroundImage(file, preset = null, request = ++backgroundReq
 }
 
 async function exportLoop() {
+  if (state.tool === 'poster') return exportPoster();
   if (!state.assets.length || state.exporting || uploading || backgroundLoading) return;
-  state.exporting = true; $('.bottom-dock').classList.add('recording'); $('#share-trigger').disabled = true; $('#export-btn').disabled = true; $('#export-progress').classList.add('visible'); $('#export-status').textContent = 'EXPORTING LOOP...';
+  state.exporting = true; $('#tool-trigger').disabled = true; $('.bottom-dock').classList.add('recording'); $('#share-trigger').disabled = true; $('#export-btn').disabled = true; $('#export-progress').classList.add('visible'); $('#export-status').textContent = 'EXPORTING LOOP...';
   await Promise.all(state.assets.filter((asset) => asset.kind === 'text').map((asset) => asset.pending));
-  const width = 1080, height = 1920, fps = 60, frames = 600;
+  const width = 1080, height = 1920, fps = mobileDevice ? 30 : 60, frames = fps * 10;
   const exportCanvas = document.createElement('canvas'); exportCanvas.width = width; exportCanvas.height = height;
   const exportRenderer = new THREE.WebGLRenderer({ canvas: exportCanvas, antialias: true, preserveDrawingBuffer: true }); exportRenderer.setSize(width, height, false); exportRenderer.outputColorSpace = THREE.SRGBColorSpace; exportRenderer.toneMapping = THREE.ACESFilmicToneMapping;
   const previousCameraAspect = camera.aspect;
@@ -466,7 +490,7 @@ async function exportLoop() {
   await output.start();
   for (let frame = 0; frame < frames; frame++) {
     state.turntableAngle = (frame / frames) * Math.PI * 2 * state.direction;
-    state.assets.forEach((asset, index) => { asset.axis.rotation.y = state.turntableAngle + index * state.depth; });
+    updateComposition();
     exportRenderer.render(scene, camera);
     await videoSource.add(frame / fps, 1 / fps, { keyFrame: frame % 60 === 0 });
     if (frame % 6 === 0) $('#export-progress-fill').style.width = `${Math.round((frame / frames) * 100)}%`;
@@ -476,7 +500,7 @@ async function exportLoop() {
   const blob = new Blob([target.buffer], { type: 'video/quicktime' });
   const link = document.createElement('a');
   const url = URL.createObjectURL(blob);
-  link.href = url; link.download = 'motion-loop.mov'; link.click();
+  link.href = url; link.download = `${state.tool}-loop.mov`; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
   $('#export-progress-fill').style.width = '100%';
   $('#export-status').textContent = 'Video saved';
@@ -485,10 +509,13 @@ async function exportLoop() {
     $('#export-status').textContent = 'Could not save video. Try again in a browser with video encoding support.';
   } finally {
     exportRenderer.dispose();
+    exportRenderer.forceContextLoss();
+    exportCanvas.width = exportCanvas.height = 1;
     camera.aspect = previousCameraAspect;
     camera.updateProjectionMatrix();
     $('#export-btn').disabled = false;
     $('#share-trigger').disabled = false;
+    $('#tool-trigger').disabled = false;
     $('.bottom-dock').classList.remove('recording');
     state.exporting = false;
     resize();
@@ -549,7 +576,14 @@ $('#background-image-clear').addEventListener('click', clearBackgroundImage);
 $('#direction').addEventListener('click', () => { state.direction *= -1; $('#direction').classList.toggle('reverse', state.direction < 0); });
 $('#export-btn').addEventListener('click', exportLoop);
 
-function animate() { requestAnimationFrame(animate); if (!state.exporting && state.playing && !document.hidden) { state.turntableAngle += 0.0025 * state.speed * state.direction; state.assets.forEach((asset, index) => { asset.axis.rotation.y = state.turntableAngle + index * state.depth; }); } if (!state.exporting && !document.hidden && !renderer.getContext().isContextLost()) { controls.update(); renderer.render(scene, camera); } }
+function animate() {
+  requestAnimationFrame(animate);
+  if (!state.exporting && state.playing && !document.hidden && state.tool !== 'poster') {
+    state.turntableAngle += 0.0025 * (state.tool === 'echo' ? toolOptions.echo.speed : state.speed) * state.direction;
+    updateComposition();
+  }
+  if (!state.exporting && !document.hidden && !renderer.getContext().isContextLost()) { controls.update(); renderer.render(scene, camera); }
+}
 let currentSheet = null;
 function openSheet(name) {
   currentSheet = name;
@@ -577,15 +611,95 @@ $('#text-content').addEventListener('input', (event) => { const asset = selected
 $$('[data-font]').forEach((button) => button.addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; asset.font = button.dataset.font; syncTextControls(); queueText(asset); }));
 $('#text-color').addEventListener('input', (event) => { const asset = selectedText(); if (!asset || state.exporting) return; asset.color = event.currentTarget.value; queueText(asset); });
 for (const [id, key] of [['text-size', 'scale'], ['text-height', 'height']]) {
-  $(`#${id}`).addEventListener('input', (event) => { const asset = selectedText(); if (!asset || state.exporting) return; const layer = asset.layers[0]; layer[key] = Number(event.currentTarget.value); layer.mesh.scale.setScalar(asset.size * state.scale * layer.scale); layer.mesh.position.y = state.pivotY + layer.height; });
+  $(`#${id}`).addEventListener('input', (event) => { const asset = selectedText(); if (!asset || state.exporting) return; const layer = asset.layers[0]; layer[key] = Number(event.currentTarget.value); updateComposition(); });
 }
 $('#text-visibility').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; asset.layers[0].visible = !asset.layers[0].visible; addLayers(); });
 $('#delete-text').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; releaseTexture(asset.layers[0].texture); state.assets.splice(state.selectedAsset, 1); state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1)); addLayers(); });
+function setToolMenu(open, focus = false) {
+  $('#tool-menu').hidden = !open;
+  $('#tool-trigger').setAttribute('aria-expanded', String(open));
+  if (focus) (open ? $('[data-tool][aria-checked="true"]') : $('#tool-trigger')).focus();
+}
+async function selectTool(name) {
+  if (!TOOLS[name] || state.exporting || uploading) return;
+  if (state.tool === name) { setToolMenu(false, true); return; }
+  const backdrop = { ...toolBackdrops[name] };
+  state.tool = name;
+  setToolMenu(false, true);
+  document.body.dataset.tool = name;
+  document.documentElement.style.setProperty('--accent', TOOLS[name].accent);
+  $('#tool-name').textContent = TOOLS[name].label;
+  $('#tool-symbol').textContent = TOOLS[name].label[0];
+  document.title = `${TOOLS[name].label} — Cutout editor`;
+  $$('[data-tool]').forEach((button) => button.setAttribute('aria-checked', String(button.dataset.tool === name)));
+  for (const tool of Object.keys(TOOLS)) $(`#${tool}-tunings`).hidden = tool !== name;
+  $('[data-sheet="motion"] span').textContent = TOOLS[name].tuning;
+  $('#sheet-text .sheet-heading p').textContent = name === 'motion' ? 'Rotates with your collage' : name === 'poster' ? 'Set your type' : 'Type above the trail';
+  $('#sheet-share .sheet-heading h2').textContent = name === 'poster' ? 'Save poster' : 'Save loop';
+  $('#sheet-share .sheet-heading p').textContent = name === 'poster' ? '1080 × 1920 · PNG' : `10-second video · 1080 × 1920 · ${mobileDevice ? 30 : 60} fps`;
+  $('#export-kind').textContent = name === 'poster' ? 'Portrait image' : 'Portrait video';
+  $('#export-format').firstChild.textContent = name === 'poster' ? 'PNG ' : 'MOV ';
+  $('#export-btn').firstChild.textContent = name === 'poster' ? 'Save image ' : 'Save video ';
+  controls.reset();
+  controls.enabled = name === 'motion';
+  camera.position.set(0, name === 'motion' ? 0.2 : 0, 5.6);
+  camera.lookAt(0, 0, 0);
+  clearBackgroundImage();
+  if (backdrop.color) { setCanvasColor(backdrop.color); $('#canvas-color').value = backdrop.color; }
+  else if (backdrop.preset) $(`[data-background="${backdrop.preset}"]`).click();
+  else if (backdrop.file) setBackgroundImage(backdrop.file);
+  openSheet(null);
+  addLayers();
+}
+async function exportPoster() {
+  if (!state.assets.length || state.exporting || uploading || backgroundLoading) return;
+  state.exporting = true;
+  $('#tool-trigger').disabled = true;
+  $('#export-btn').disabled = true;
+  $('#share-trigger').disabled = true;
+  $('.bottom-dock').classList.add('recording');
+  let outputRenderer;
+  const surface = document.createElement('canvas');
+  const aspect = camera.aspect;
+  try {
+    await Promise.all(state.assets.filter((asset) => asset.kind === 'text').map((asset) => asset.pending));
+    outputRenderer = new THREE.WebGLRenderer({ canvas: surface, antialias: !mobileDevice, preserveDrawingBuffer: true });
+    outputRenderer.setSize(1080, 1920, false);
+    outputRenderer.outputColorSpace = THREE.SRGBColorSpace;
+    outputRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+    camera.aspect = 9 / 16; camera.updateProjectionMatrix();
+    updateComposition();
+    outputRenderer.render(scene, camera);
+    const blob = await new Promise((resolve, reject) => surface.toBlob((blob) => blob ? resolve(blob) : reject(new Error('Image could not be saved')), 'image/png'));
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a'); link.href = url; link.download = 'poster.png'; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    $('#export-progress').classList.add('visible'); $('#export-status').textContent = 'Image saved';
+  } catch (error) { $('#export-progress').classList.add('visible'); $('#export-status').textContent = error.message; }
+  finally {
+    outputRenderer?.dispose(); outputRenderer?.forceContextLoss(); surface.width = surface.height = 1;
+    camera.aspect = aspect; camera.updateProjectionMatrix();
+    state.exporting = false; $('#export-btn').disabled = false; $('#share-trigger').disabled = false; $('#tool-trigger').disabled = false;
+    $('.bottom-dock').classList.remove('recording'); resize();
+  }
+}
+$('#tool-trigger').addEventListener('click', () => setToolMenu($('#tool-menu').hidden));
+$('#tool-trigger').addEventListener('keydown', (event) => { if (event.key === 'ArrowDown') { event.preventDefault(); setToolMenu(true, true); } });
+$$('[data-tool]').forEach((button) => button.addEventListener('click', () => selectTool(button.dataset.tool)));
+$('#tool-menu').addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') { event.stopPropagation(); setToolMenu(false, true); }
+  if (['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); const items = [...$$('[data-tool]')]; const index = items.indexOf(document.activeElement); items[(index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus(); }
+});
+document.addEventListener('pointerdown', (event) => { if (!$('.tool-switcher').contains(event.target)) setToolMenu(false); });
+for (const [tool, keys] of [['poster', ['spread', 'tilt', 'scale']], ['echo', ['copies', 'spacing', 'speed']]]) {
+  for (const key of keys) $(`#${tool}-${key}`).addEventListener('input', (event) => { if (state.exporting) return; toolOptions[tool][key] = Number(event.currentTarget.value); if (key === 'copies') addLayers(); else updateComposition(); });
+}
 function fitViewport() {
   document.documentElement.style.setProperty('--app-height', `${window.visualViewport?.height || window.innerHeight}px`);
 }
 window.visualViewport?.addEventListener('resize', fitViewport);
 fitViewport();
+$('#sheet-share .sheet-heading p').textContent = `10-second video · 1080 × 1920 · ${mobileDevice ? 30 : 60} fps`;
 new ResizeObserver(resize).observe($('.stage-wrap'));
 $('#export-btn').disabled = true;
 updateLayerList(); resize(); animate();
