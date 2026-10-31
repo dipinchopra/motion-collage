@@ -1,4 +1,4 @@
-import { AutoModelForImageSegmentation, Tensor, env } from '@huggingface/transformers';
+import { AutoModelForSemanticSegmentation, Tensor, env } from '@huggingface/transformers';
 import { MODEL_SIZE, modelPixels, maskPixels } from './segmentation-data.js';
 
 env.allowLocalModels = false;
@@ -14,7 +14,7 @@ self.onmessage = async ({ data: { id, pixels, width, height } }) => {
     if (width !== MODEL_SIZE || height !== MODEL_SIZE) throw new Error('Unsupported cutout input size');
     if (!model) {
       self.postMessage({ id, type: 'status', message: 'Loading background removal…' });
-      model = await AutoModelForImageSegmentation.from_pretrained('briaai/RMBG-1.4', {
+      model = await AutoModelForSemanticSegmentation.from_pretrained('briaai/RMBG-1.4', {
         device: 'wasm', dtype: 'q8',
         session_options: { enableCpuMemArena: false, enableMemPattern: false },
         progress_callback: (progress) => {
