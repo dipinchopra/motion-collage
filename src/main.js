@@ -5,10 +5,12 @@ import { MODEL_SIZE } from './segmentation-data.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Output, MovOutputFormat, BufferTarget, CanvasSource } from 'mediabunny';
 import './style.css';
-import orangeTiles from '../background/ -5.jpg';
-import burgundyTiles from '../background/ -6.jpg';
-import redTiles from '../background/ -7.jpg';
-import bluePlaid from '../background/ -8.jpg';
+import orangeTiles from './assets/backgrounds/orange-mosaic.jpg';
+import burgundyTiles from './assets/backgrounds/burgundy-tiles.jpg';
+import redTiles from './assets/backgrounds/red-tiles.jpg';
+import bluePlaid from './assets/backgrounds/blue-plaid.jpg';
+
+const stickerFiles = import.meta.glob('./assets/stickers/*.png', { eager: true, query: '?url', import: 'default' });
 
 const mobileDevice = matchMedia('(pointer: coarse)').matches;
 const imageLimit = mobileDevice ? 768 : 1280;
@@ -37,7 +39,7 @@ scene.add(new THREE.AmbientLight('#fff7e7', 2.2));
 const key = new THREE.DirectionalLight('#ffcf91', 3.5); key.position.set(-3, 4, 5); scene.add(key);
 const fill = new THREE.DirectionalLight('#75d8d0', 2); fill.position.set(4, -2, 2); scene.add(fill);
 
-const photoCount = () => state.assets.filter((asset) => asset.kind !== 'text').length;
+const photoCount = () => state.assets.filter((asset) => !['text', 'sticker'].includes(asset.kind)).length;
 const state = { assets: [], tool: 'motion', mode: 'standard', speed: 1, direction: 1, depth: Math.PI / 2, spacingAuto: true, scale: 1, pivotY: 0, positionX: 0, positionY: 0, canvasColor: '#f1f0ed', backgroundTexture: null, backgroundBitmap: null, exporting: false, frame: 0, turntableAngle: 0, nextLayerOrder: 0, selectedAsset: 0, playing: true };
 
 function resize() {
@@ -195,7 +197,7 @@ function refreshLayerGeometry(asset, layer) {
 
 function addLayers() {
   if (state.tool === 'motion' && state.spacingAuto) {
-    state.depth = Math.PI / Math.max(2, state.assets.length);
+    state.depth = Math.PI / Math.max(2, state.assets.filter((asset) => asset.kind !== 'sticker').length);
     $('#depth').value = String(state.depth);
     $('#depth-value').textContent = state.depth.toFixed(2);
   }
@@ -215,7 +217,7 @@ function addLayers() {
       const geometry = bands === 1 ? layerGeometry(asset) : null;
       layer.instances = [];
       for (let copy = 0; copy < copies; copy++) {
-        const material = new THREE.MeshBasicMaterial({ map: layer.texture, transparent: true, side: THREE.DoubleSide, depthWrite: state.tool === 'motion', alphaTest: state.tool === 'motion' ? 0.02 : 0, color: state.tool === 'echo' && copy < copies - 1 ? '#ed8c98' : '#ffffff' });
+        const material = new THREE.MeshBasicMaterial({ map: layer.texture, transparent: true, side: THREE.DoubleSide, depthWrite: state.tool === 'motion', alphaTest: state.tool === 'motion' ? 0.02 : 0, polygonOffset: asset.kind === 'sticker', polygonOffsetFactor: -1, polygonOffsetUnits: -1, color: state.tool === 'echo' && copy < copies - 1 ? '#ed8c98' : '#ffffff' });
         const mesh = new THREE.Mesh(geometry || layerGeometry(asset, copy, bands), material);
         mesh.renderOrder = state.tool === 'motion' || state.tool === 'orbit' ? 0 : state.tool === 'stamp' ? (assetIndex * toolOptions.stamp.hits + copy) * 100 + layer.order : layer.order * 64 + copy;
         axis.add(mesh);
@@ -234,8 +236,10 @@ function updateComposition(phase = state.turntableAngle) {
   pivot.position.set(state.tool === 'motion' ? state.positionX : 0, state.tool === 'motion' ? state.positionY : 0, 0);
   state.assets.forEach((asset, assetIndex) => {
     const text = asset.kind === 'text';
-    const index = assetIndex;
-    const count = state.assets.length;
+    const wings = state.assets.filter((item) => item.kind !== 'sticker');
+    const host = asset.kind === 'sticker' ? (wings.includes(asset.host) ? asset.host : wings[0]) : asset;
+    const index = state.tool === 'motion' ? Math.max(0, wings.indexOf(host)) : assetIndex;
+    const count = state.tool === 'motion' ? Math.max(1, wings.length) : state.assets.length;
     asset.axis.position.set(0, 0, 0);
     asset.axis.rotation.set(0, 0, 0);
     asset.layers.forEach((layer) => {
@@ -244,7 +248,7 @@ function updateComposition(phase = state.turntableAngle) {
         if (state.tool === 'motion') asset.axis.rotation.y = transform.ry;
         const scale = asset.size * layer.scale * transform.scale * (state.tool === 'motion' ? state.scale : 1);
         const bandOffset = (mesh.geometry.userData.bandOffset || 0) * scale;
-        mesh.position.set(transform.x, transform.y + bandOffset + layer.height + (state.tool === 'motion' ? state.pivotY : 0), transform.z);
+        mesh.position.set(transform.x + (layer.x || 0), transform.y + bandOffset + layer.height + (state.tool === 'motion' ? state.pivotY : 0), transform.z);
         mesh.rotation.set(transform.rx || 0, state.tool === 'motion' ? 0 : transform.ry, transform.rz + layer.angle);
         mesh.scale.setScalar(scale);
         mesh.material.opacity = transform.opacity;
@@ -349,6 +353,66 @@ function allLayers() {
   return state.assets.flatMap((asset, assetIndex) => asset.layers.map((layer) => ({ asset, assetIndex, layer })));
 }
 
+function selectedSticker() {
+  const asset = state.assets[state.selectedAsset];
+  return asset?.kind === 'sticker' ? asset : null;
+}
+function detachStickers(asset) {
+  state.assets.forEach((entry) => { if (entry.host === asset) entry.host = null; });
+}
+function syncStickerControls() {
+  const asset = selectedSticker();
+  $('#sticker-controls').hidden = !asset;
+  const disabled = stickerLoading || state.assets.filter((entry) => entry.kind === 'sticker').length >= 12;
+  $$('[data-sticker], [data-emoji]').forEach((button) => button.disabled = disabled);
+  if (!asset) return;
+  const layer = asset.layers[0];
+  for (const key of ['scale', 'angle', 'x', 'height']) $(`#sticker-${key}`).value = layer[key];
+  $('#sticker-visibility').textContent = layer.visible ? 'Hide sticker' : 'Show sticker';
+  $('#sticker-visibility').setAttribute('aria-pressed', String(layer.visible));
+}
+let stickerLoading = false;
+async function addSticker(preset, emoji = null) {
+  if (state.exporting || stickerLoading || state.assets.filter((asset) => asset.kind === 'sticker').length >= 12) return;
+  const selected = state.assets[state.selectedAsset];
+  const host = selected?.kind === 'sticker' ? selected.host : selected;
+  stickerLoading = true;
+  $('#export-btn').disabled = true;
+  syncStickerControls();
+  $('#sticker-status').textContent = '';
+  let surface;
+  try {
+    if (emoji) {
+      surface = document.createElement('canvas'); surface.width = surface.height = 384;
+      const context = surface.getContext('2d');
+      context.font = '240px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+      context.textAlign = 'center'; context.textBaseline = 'middle';
+      context.fillText(emoji, 192, 200);
+    } else {
+      const response = await fetch(preset.url);
+      if (!response.ok) throw new Error('Sticker could not be loaded');
+      surface = await decodeImage(await response.blob());
+    }
+    const texture = textureFromCanvas(surface);
+    const preview = thumbnailUrl(surface);
+    const positions = [[0.45,0.6],[-0.45,-0.6],[-0.4,0.7],[0.4,-0.5]];
+    const [x, height] = positions[state.assets.filter((entry) => entry.kind === 'sticker').length % positions.length];
+    const asset = { kind: 'sticker', host, image: surface, cutoutUrl: preview, previewUrl: preview, size: 1, layers: [{ kind: 'sticker', label: preset?.label || emoji, texture, visible: true, height, x, angle: 0, scale: 0.38, order: state.nextLayerOrder++ }] };
+    state.assets.push(asset);
+    state.selectedAsset = state.assets.length - 1;
+    addLayers();
+    openSheet('stickers');
+    $('#sheet-stickers').scrollTop = 0;
+  } catch (error) {
+    if (surface) surface.width = surface.height = 1;
+    $('#sticker-status').textContent = error.message || 'Sticker could not be added';
+  } finally {
+    stickerLoading = false;
+    syncStickerControls();
+    $('#export-btn').disabled = !state.assets.length || backgroundLoading || state.exporting;
+  }
+}
+
 function layerName(layer) {
   return { mask: 'Cutout', invert: 'Background', inverse: 'Inverse' }[layer.kind] || layer.label;
 }
@@ -359,15 +423,15 @@ function layerThumbnail(layer) {
 function updateLayerList() {
   $('#empty-state').classList.toggle('hidden', state.assets.length > 0);
   const list = $('#layer-list');
-  list.innerHTML = state.assets.length ? state.assets.map((asset, index) => `<button class="cutout-tile ${asset.kind === 'text' ? 'text-tile' : ''} ${index === state.selectedAsset ? 'selected' : ''} ${asset.layers.some((layer) => layer.visible) ? '' : 'muted'}" data-select-asset="${index}" aria-label="Edit ${asset.kind === 'text' ? 'text' : 'photo'} ${index + 1}" aria-pressed="${index === state.selectedAsset}"><img src="${asset.cutoutUrl}" alt=""><span>${String(index + 1).padStart(2, '0')}</span></button>`).join('') : '<span class="tray-placeholder">Your cutouts go here</span>';
+  list.innerHTML = state.assets.length ? state.assets.map((asset, index) => `<button class="cutout-tile ${asset.kind === 'text' ? 'text-tile' : ''} ${index === state.selectedAsset ? 'selected' : ''} ${asset.layers.some((layer) => layer.visible) ? '' : 'muted'}" data-select-asset="${index}" aria-label="Edit ${asset.kind === 'text' ? 'text' : asset.kind === 'sticker' ? 'sticker' : 'photo'} ${index + 1}" aria-pressed="${index === state.selectedAsset}"><img src="${asset.cutoutUrl}" alt=""><span>${String(index + 1).padStart(2, '0')}</span></button>`).join('') : '<span class="tray-placeholder">Your cutouts go here</span>';
   const selected = state.assets[state.selectedAsset];
-  const asset = selected?.kind === 'text' ? null : selected;
+  const asset = ['text', 'sticker'].includes(selected?.kind) ? null : selected;
   const editor = $('#cutout-editor');
   const optionScroll = editor.querySelector('.layer-options')?.scrollLeft || 0;
   const focused = editor.contains(document.activeElement) ? { index: document.activeElement.dataset.layerIndex, action: document.activeElement.dataset.layerAction } : null;
   $('#selected-caption').textContent = asset ? `Photo ${state.selectedAsset + 1}` : 'Select a photo above';
   editor.innerHTML = asset ? `<div class="layer-options" role="group" aria-label="Image layers">${asset.layers.map((layer, index) => `<button class="layer-option ${layer.visible ? 'on' : ''}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="visibility" aria-pressed="${layer.visible}"><img src="${layerThumbnail(layer)}" alt=""><span>${layerName(layer)}</span><i>${layer.visible ? '✓' : '+'}</i></button>`).join('')}</div>${asset.layers.map((layer, index) => `<div class="layer-detail ${layer.visible ? '' : 'inactive'}"><div class="layer-detail-head"><span>${layerName(layer)}</span><div><button aria-label="Move ${layerName(layer).toLowerCase()} backward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="back">↓</button><button aria-label="Move ${layerName(layer).toLowerCase()} forward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="forward">↑</button></div></div><div class="mask-controls">${[['height','Height',-0.8,0.8],['angle','Tilt',-1.2,1.2],['scale','Size',0.4,1.4]].map(([key,label,min,max]) => `<label>${label}<input aria-label="${layerName(layer)} ${label.toLowerCase()}" type="range" min="${min}" max="${max}" step="0.01" value="${layer[key]}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="${key}"></label>`).join('')}</div>${layer.kind === 'inverse' ? `<label class="panel-color">Panel color<input type="color" value="${layer.color}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="color"></label>` : ''}</div>`).join('')}<button class="delete-photo" data-asset-index="${state.selectedAsset}" data-layer-action="delete">Remove photo</button>` : '<p class="no-selection">Add a photo to start editing.</p>';
-  list.querySelectorAll('[data-select-asset]').forEach((button) => button.addEventListener('click', () => { state.selectedAsset = Number(button.dataset.selectAsset); updateLayerList(); openSheet(state.assets[state.selectedAsset].kind === 'text' ? 'text' : 'cutouts'); }));
+  list.querySelectorAll('[data-select-asset]').forEach((button) => button.addEventListener('click', () => { state.selectedAsset = Number(button.dataset.selectAsset); updateLayerList(); openSheet(state.assets[state.selectedAsset].kind === 'text' ? 'text' : state.assets[state.selectedAsset].kind === 'sticker' ? 'stickers' : 'cutouts'); }));
   $('#asset-meta').textContent = `${photoCount()} / 5`;
   $('#upload-trigger').disabled = photoCount() >= 5;
   $('#export-btn').disabled = !state.assets.length || backgroundLoading || state.exporting;
@@ -408,6 +472,7 @@ function updateLayerList() {
     const asset = state.assets[index];
     asset.layers.forEach((layer) => releaseTexture(layer.texture));
     asset.image.width = asset.image.height = 1;
+    detachStickers(asset);
     state.assets.splice(index, 1);
     state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1));
     $('#asset-meta').textContent = `${photoCount()} / 5`;
@@ -418,6 +483,7 @@ function updateLayerList() {
   if (options) options.scrollLeft = optionScroll;
   if (focused?.index && focused.action) editor.querySelector(`[data-layer-index="${focused.index}"][data-layer-action="${focused.action}"]`)?.focus({ preventScroll: true });
   syncTextControls();
+  syncStickerControls();
 }
 
 function isHeic(file) {
@@ -546,7 +612,7 @@ async function setBackgroundImage(file, preset = null, request = ++backgroundReq
 }
 
 async function exportLoop() {
-  if (!state.assets.length || state.exporting || uploading || backgroundLoading) return;
+  if (!state.assets.length || state.exporting || uploading || backgroundLoading || stickerLoading) return;
   state.exporting = true; $('#tool-trigger').disabled = true; $('.bottom-dock').classList.add('recording'); $('#share-trigger').disabled = true; $('#export-btn').disabled = true; $('#export-progress').classList.add('visible'); $('#export-status').textContent = 'EXPORTING LOOP...';
   await Promise.all(state.assets.filter((asset) => asset.kind === 'text').map((asset) => asset.pending));
   const width = 1080, height = 1920, fps = mobileDevice ? 30 : 60, frames = fps * 10;
@@ -664,6 +730,7 @@ function animate(now = performance.now()) {
 let currentSheet = null;
 function openSheet(name) {
   currentSheet = name;
+  if (name === 'stickers') syncStickerControls();
   if (name === 'text') {
     if (state.assets[state.selectedAsset]?.kind !== 'text') {
       const index = state.assets.findIndex((asset) => asset.kind === 'text');
@@ -698,7 +765,20 @@ for (const [id, key] of [['text-size', 'scale'], ['text-height', 'height']]) {
   $(`#${id}`).addEventListener('input', (event) => { const asset = selectedText(); if (!asset || state.exporting) return; const layer = asset.layers[0]; layer[key] = Number(event.currentTarget.value); updateComposition(); });
 }
 $('#text-visibility').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; asset.layers[0].visible = !asset.layers[0].visible; addLayers(); });
-$('#delete-text').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; releaseTexture(asset.layers[0].texture); state.assets.splice(state.selectedAsset, 1); state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1)); addLayers(); });
+$('#delete-text').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; releaseTexture(asset.layers[0].texture); detachStickers(asset); state.assets.splice(state.selectedAsset, 1); state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1)); addLayers(); });
+const stickerPresets = [
+  ['blue-scribble', 'Blue scribble'], ['orange-star', 'Orange paper star'], ['pink-scribble', 'Pink scribble'],
+  ['music-notes', 'Music notes'], ['mint-star', 'Mint paper star'], ['blue-paper', 'Blue torn paper'], ['red-heart', 'Red paper heart'],
+].map(([id, label]) => ({ id, label, url: stickerFiles[`./assets/stickers/${id}.png`] }));
+$('#sticker-library').innerHTML = stickerPresets.map((preset) => `<button data-sticker="${preset.id}" aria-label="Add ${preset.label}"><img src="${preset.url}" alt="" loading="lazy"></button>`).join('');
+$('#emoji-library').innerHTML = ['✨','⭐','❤️','🌼','🦋','🔥','🎀','🍒'].map((emoji) => `<button data-emoji="${emoji}" aria-label="Add ${emoji} sticker">${emoji}</button>`).join('');
+$$('[data-sticker]').forEach((button) => button.addEventListener('click', () => addSticker(stickerPresets.find((preset) => preset.id === button.dataset.sticker))));
+$$('[data-emoji]').forEach((button) => button.addEventListener('click', () => addSticker(null, button.dataset.emoji)));
+for (const key of ['scale', 'angle', 'x', 'height']) {
+  $(`#sticker-${key}`).addEventListener('input', (event) => { const asset = selectedSticker(); if (!asset || state.exporting) return; asset.layers[0][key] = Number(event.currentTarget.value); updateComposition(); });
+}
+$('#sticker-visibility').addEventListener('click', () => { const asset = selectedSticker(); if (!asset || state.exporting) return; asset.layers[0].visible = !asset.layers[0].visible; addLayers(); });
+$('#delete-sticker').addEventListener('click', () => { const asset = selectedSticker(); if (!asset || state.exporting) return; releaseTexture(asset.layers[0].texture); state.assets.splice(state.selectedAsset, 1); state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1)); addLayers(); });
 function setToolMenu(open, focus = false) {
   $('#tool-menu').hidden = !open;
   $('#tool-trigger').setAttribute('aria-expanded', String(open));

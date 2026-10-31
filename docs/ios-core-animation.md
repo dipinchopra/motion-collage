@@ -34,3 +34,11 @@ For the native implementation use a safe-area-aware sheet with a `ScrollView` fo
 - [CAKeyframeAnimation](https://developer.apple.com/documentation/quartzcore/cakeyframeanimation)
 - [CAReplicatorLayer](https://developer.apple.com/documentation/quartzcore/careplicatorlayer) for treatments whose per-copy transforms are uniform
 - [Sheet content scrolling](https://developer.apple.com/documentation/swiftui/view/presentationcontentinteraction(_:))
+
+## Stickers and emoji
+
+The sticker library uses the supplied transparent PNGs. Emoji are rasterized once with the platform color emoji font. Both become ordinary image layers and are included by the existing preview/video pipeline. No segmentation runs for stickers.
+
+In Motion, a sticker inherits the selected image/text wing's angle; it does not add a new wing or change spacing. Native equivalents are child `CALayer` objects with shared `CGImage` contents and local position/rotation/scale. Detach or reassign the host when deleting its image.
+
+Bundled background/sticker filenames are whitespace-free: the URL constructor trims leading whitespace from relative URL strings, so a leading space in an emitted asset filename produces a nonexistent request path.
