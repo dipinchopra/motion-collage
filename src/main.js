@@ -116,18 +116,6 @@ function drawTexture(image, mask, inverted = false) {
   return textureFromCanvas(output);
 }
 
-function inversePanel(cutout, color = '#171717') {
-  const surface = document.createElement('canvas');
-  surface.width = cutout.width; surface.height = cutout.height;
-  const context = surface.getContext('2d');
-  context.fillStyle = color;
-  context.fillRect(0, 0, surface.width, surface.height);
-  context.globalCompositeOperation = 'destination-out';
-  context.drawImage(cutout, 0, 0);
-  context.globalCompositeOperation = 'source-over';
-  return textureFromCanvas(surface);
-}
-
 let segmentationWorker = null;
 let segmentationId = 0;
 let segmentationJob = null;
@@ -430,7 +418,7 @@ function updateLayerList() {
   const optionScroll = editor.querySelector('.layer-options')?.scrollLeft || 0;
   const focused = editor.contains(document.activeElement) ? { index: document.activeElement.dataset.layerIndex, action: document.activeElement.dataset.layerAction } : null;
   $('#selected-caption').textContent = asset ? `Photo ${state.selectedAsset + 1}` : 'Select a photo above';
-  editor.innerHTML = asset ? `<div class="layer-options" role="group" aria-label="Image layers">${asset.layers.map((layer, index) => `<button class="layer-option ${layer.visible ? 'on' : ''}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="visibility" aria-pressed="${layer.visible}"><img src="${layerThumbnail(layer)}" alt=""><span>${layerName(layer)}</span><i>${layer.visible ? '✓' : '+'}</i></button>`).join('')}</div>${asset.layers.map((layer, index) => `<div class="layer-detail ${layer.visible ? '' : 'inactive'}" data-layer-detail="${index}"><div class="layer-detail-head"><span>${layerName(layer)}</span><div><button aria-label="Move ${layerName(layer).toLowerCase()} backward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="back">↓</button><button aria-label="Move ${layerName(layer).toLowerCase()} forward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="forward">↑</button></div></div><div class="mask-controls">${[['height','Height',-0.8,0.8],['angle','Tilt',-1.2,1.2],['scale','Size',0.4,1.4]].map(([key,label,min,max]) => `<label>${label}<input aria-label="${layerName(layer)} ${label.toLowerCase()}" type="range" min="${min}" max="${max}" step="0.01" value="${layer[key]}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="${key}"></label>`).join('')}</div>${layer.kind === 'inverse' ? `<label class="panel-color">Panel color<input type="color" value="${layer.color}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="color"></label>` : ''}</div>`).join('')}<button class="delete-photo" data-asset-index="${state.selectedAsset}" data-layer-action="delete">Remove photo</button>` : '<p class="no-selection">Add a photo to start editing.</p>';
+  editor.innerHTML = asset ? `<div class="layer-options" role="group" aria-label="Image layers">${asset.layers.map((layer, index) => `<button class="layer-option ${layer.visible ? 'on' : ''}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="visibility" aria-pressed="${layer.visible}"><img src="${layerThumbnail(layer)}" alt=""><span>${layerName(layer)}</span><i>${layer.visible ? '✓' : '+'}</i></button>`).join('')}</div>${asset.layers.map((layer, index) => `<div class="layer-detail ${layer.visible ? '' : 'inactive'}" data-layer-detail="${index}"><div class="layer-detail-head"><span>${layerName(layer)}</span><div><button aria-label="Move ${layerName(layer).toLowerCase()} backward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="back">↓</button><button aria-label="Move ${layerName(layer).toLowerCase()} forward" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="forward">↑</button></div></div><div class="mask-controls">${[['height','Height',-0.8,0.8],['angle','Tilt',-1.2,1.2],['scale','Size',0.4,1.4]].map(([key,label,min,max]) => `<label>${label}<input aria-label="${layerName(layer)} ${label.toLowerCase()}" type="range" min="${min}" max="${max}" step="0.01" value="${layer[key]}" data-asset-index="${state.selectedAsset}" data-layer-index="${index}" data-layer-action="${key}"></label>`).join('')}</div></div>`).join('')}<button class="delete-photo" data-asset-index="${state.selectedAsset}" data-layer-action="delete">Remove photo</button>` : '<p class="no-selection">Add a photo to start editing.</p>';
   list.querySelectorAll('[data-select-asset]').forEach((button) => button.addEventListener('click', () => { state.selectedAsset = Number(button.dataset.selectAsset); updateLayerList(); openSheet(state.assets[state.selectedAsset].kind === 'text' ? 'text' : state.assets[state.selectedAsset].kind === 'sticker' ? 'stickers' : 'cutouts'); }));
   $('#asset-meta').textContent = `${photoCount()} / 5`;
   $('#upload-trigger').disabled = photoCount() >= 5;
@@ -442,17 +430,6 @@ function updateLayerList() {
     if (event.currentTarget.dataset.layerAction === 'angle') layer.angle = Number(event.currentTarget.value);
     if (event.currentTarget.dataset.layerAction === 'scale') layer.scale = Number(event.currentTarget.value);
     if (event.currentTarget.dataset.layerAction === 'visibility') layer.visible = !layer.visible;
-    if (event.currentTarget.dataset.layerAction === 'color') {
-      layer.color = event.currentTarget.value;
-      const context = layer.texture.image.getContext('2d');
-      context.globalCompositeOperation = 'source-in';
-      context.fillStyle = layer.color;
-      context.fillRect(0, 0, layer.texture.image.width, layer.texture.image.height);
-      context.globalCompositeOperation = 'source-over';
-      layer.texture.needsUpdate = true;
-      layer.previewUrl = thumbnailUrl(layer.texture.image);
-      editor.querySelector(`[data-layer-index="${event.currentTarget.dataset.layerIndex}"] img`).src = layer.previewUrl;
-    }
     if (event.currentTarget.dataset.layerAction === 'forward' || event.currentTarget.dataset.layerAction === 'back') {
       const direction = event.currentTarget.dataset.layerAction === 'forward' ? 1 : -1;
       const ordered = allLayers().map((entry) => entry.layer).sort((a, b) => a.order - b.order);
@@ -526,14 +503,14 @@ async function segmentImage(file) {
   if (!mask?.data || !mask.width || !mask.height) { image.width = image.height = 1; throw new Error('Background removal returned no mask'); }
   const maskTexture = drawTexture(image, mask, false);
   const invertedTexture = drawTexture(image, mask, true);
-  const inverseTexture = inversePanel(maskTexture.image);
+  const inverseTexture = drawTexture(image, mask, true);
   const previewUrl = thumbnailUrl(image);
   const dimensions = { width: image.width, height: image.height };
   image.width = image.height = 1;
   state.assets.push({ file, image: dimensions, previewUrl, cutoutUrl: thumbnailUrl(maskTexture.image), size: 0.66 + (state.assets.length % 3) * 0.09, layers: [
     { kind: 'mask', label: 'MASK', texture: maskTexture, visible: state.mode !== 'inverted', height: 0, angle: 0, scale: 1, order: state.nextLayerOrder++ },
     { kind: 'invert', label: 'Background', texture: invertedTexture, visible: state.mode === 'inverted', height: 0, angle: 0, scale: 1, order: state.nextLayerOrder++ },
-    { kind: 'inverse', label: 'Inverse', texture: inverseTexture, color: '#171717', visible: false, height: 0, angle: 0, scale: 1, order: state.nextLayerOrder++ }
+    { kind: 'inverse', label: 'Inverse', texture: inverseTexture, visible: false, height: 0, angle: 0, scale: 1, order: state.nextLayerOrder++ }
   ] });
   state.selectedAsset = state.assets.length - 1;
   addLayers();
