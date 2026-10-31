@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { pipeline, env } from '@huggingface/transformers';
 import { Output, MovOutputFormat, BufferTarget, CanvasSource } from 'mediabunny';
 import './style.css';
 import orangeTiles from '../background/ -5.jpg';
@@ -8,8 +7,8 @@ import burgundyTiles from '../background/ -6.jpg';
 import redTiles from '../background/ -7.jpg';
 import bluePlaid from '../background/ -8.jpg';
 
-env.allowLocalModels = false;
-env.useBrowserCache = true;
+const mobileDevice = matchMedia('(pointer: coarse)').matches;
+const imageLimit = mobileDevice ? 768 : 1280;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => document.querySelectorAll(selector);
@@ -18,8 +17,10 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color('#f1f0ed');
 const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
 camera.position.set(0, 0.2, 5.6);
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, preserveDrawingBuffer: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: !mobileDevice, alpha: false, preserveDrawingBuffer: false, powerPreference: 'low-power' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, mobileDevice ? 1.5 : 2));
+canvas.addEventListener('webglcontextlost', (event) => { event.preventDefault(); $('#render-status').hidden = false; });
+canvas.addEventListener('webglcontextrestored', () => { $('#render-status').hidden = true; resize(); });
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 const controls = new OrbitControls(camera, canvas);
@@ -34,43 +35,109 @@ const key = new THREE.DirectionalLight('#ffcf91', 3.5); key.position.set(-3, 4, 
 const fill = new THREE.DirectionalLight('#75d8d0', 2); fill.position.set(4, -2, 2); scene.add(fill);
 
 const photoCount = () => state.assets.filter((asset) => asset.kind !== 'text').length;
-const state = { assets: [], segmenter: null, mode: 'standard', speed: 0.55, direction: 1, depth: 0.7, scale: 1, pivotY: 0, positionX: 0, positionY: 0, canvasColor: '#f1f0ed', backgroundTexture: null, backgroundBitmap: null, exporting: false, frame: 0, turntableAngle: 0, nextLayerOrder: 0, selectedAsset: 0, playing: true };
+const state = { assets: [], mode: 'standard', speed: 0.55, direction: 1, depth: 0.7, scale: 1, pivotY: 0, positionX: 0, positionY: 0, canvasColor: '#f1f0ed', backgroundTexture: null, backgroundBitmap: null, exporting: false, frame: 0, turntableAngle: 0, nextLayerOrder: 0, selectedAsset: 0, playing: true };
 
 function resize() {
   const rect = canvas.getBoundingClientRect();
   if (!rect.width || !rect.height) return;
   $('.stage-wrap').style.setProperty('--preview-width', `${rect.width}px`);
-  renderer.setSize(rect.width, rect.height, false);
+  const size = renderer.getSize(new THREE.Vector2());
+  if (Math.round(size.x) !== Math.round(rect.width) || Math.round(size.y) !== Math.round(rect.height)) renderer.setSize(Math.round(rect.width), Math.round(rect.height), false);
   camera.aspect = rect.width / rect.height; camera.updateProjectionMatrix();
 }
 window.addEventListener('resize', resize);
 
-function drawTexture(image, mask, inverted = false) {
-  const output = document.createElement('canvas'); output.width = image.width; output.height = image.height;
-  const ctx = output.getContext('2d'); ctx.drawImage(image, 0, 0);
-  const maskCanvas = document.createElement('canvas'); maskCanvas.width = mask.width; maskCanvas.height = mask.height;
-  const maskContext = maskCanvas.getContext('2d');
-  const maskPixels = maskContext.createImageData(mask.width, mask.height);
-  for (let index = 0; index < mask.data.length; index++) {
-    const value = mask.data[index] <= 1 ? mask.data[index] * 255 : mask.data[index];
-    maskPixels.data[index * 4] = 255;
-    maskPixels.data[index * 4 + 1] = 255;
-    maskPixels.data[index * 4 + 2] = 255;
-    maskPixels.data[index * 4 + 3] = value;
-  }
-  maskContext.putImageData(maskPixels, 0, 0);
-  const scaledMask = document.createElement('canvas'); scaledMask.width = image.width; scaledMask.height = image.height;
-  scaledMask.getContext('2d').drawImage(maskCanvas, 0, 0, image.width, image.height);
-  const alphaData = scaledMask.getContext('2d').getImageData(0, 0, image.width, image.height).data;
-  const pixels = ctx.getImageData(0, 0, output.width, output.height);
-  for (let i = 0; i < pixels.data.length; i += 4) {
-    const maskValue = alphaData[i + 3];
-    const alpha = inverted ? 255 - maskValue : maskValue;
-    pixels.data[i + 3] = alpha;
-  }
-  ctx.putImageData(pixels, 0, 0);
-  const texture = new THREE.CanvasTexture(output); texture.colorSpace = THREE.SRGBColorSpace; texture.needsUpdate = true;
+function textureFromCanvas(surface) {
+  const texture = new THREE.CanvasTexture(surface);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.LinearFilter;
   return texture;
+}
+
+function releaseTexture(texture) {
+  if (!texture) return;
+  texture.dispose();
+  if (texture.image instanceof HTMLCanvasElement) texture.image.width = texture.image.height = 1;
+}
+
+function thumbnailUrl(image) {
+  const surface = document.createElement('canvas');
+  const ratio = Math.min(1, 160 / Math.max(image.width, image.height));
+  surface.width = Math.max(1, Math.round(image.width * ratio));
+  surface.height = Math.max(1, Math.round(image.height * ratio));
+  surface.getContext('2d').drawImage(image, 0, 0, surface.width, surface.height);
+  const url = surface.toDataURL('image/png');
+  surface.width = surface.height = 1;
+  return url;
+}
+
+async function decodeImage(file, limit = imageLimit, flip = false) {
+  const url = URL.createObjectURL(file);
+  const image = new Image();
+  const surface = document.createElement('canvas');
+  try {
+    await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = () => reject(new Error('Could not open this image')); image.src = url; });
+    const ratio = Math.min(1, limit / Math.max(image.naturalWidth, image.naturalHeight));
+    surface.width = Math.max(1, Math.round(image.naturalWidth * ratio));
+    surface.height = Math.max(1, Math.round(image.naturalHeight * ratio));
+    const context = surface.getContext('2d');
+    if (flip) { context.translate(0, surface.height); context.scale(1, -1); }
+    context.drawImage(image, 0, 0, surface.width, surface.height);
+    return surface;
+  } catch (error) { surface.width = surface.height = 1; throw error; }
+  finally { image.src = ''; URL.revokeObjectURL(url); }
+}
+
+function drawTexture(image, mask, inverted = false) {
+  const output = document.createElement('canvas');
+  output.width = image.width; output.height = image.height;
+  const context = output.getContext('2d');
+  context.drawImage(image, 0, 0);
+  const surface = document.createElement('canvas'); surface.width = mask.width; surface.height = mask.height;
+  const maskContext = surface.getContext('2d');
+  const pixels = maskContext.createImageData(mask.width, mask.height);
+  for (let i = 0; i < mask.width * mask.height; i++) pixels.data[i * 4 + 3] = mask.data[i];
+  maskContext.putImageData(pixels, 0, 0);
+  context.globalCompositeOperation = inverted ? 'destination-out' : 'destination-in';
+  context.drawImage(surface, 0, 0, output.width, output.height);
+  context.globalCompositeOperation = 'source-over';
+  surface.width = surface.height = 1;
+  return textureFromCanvas(output);
+}
+
+let segmentationWorker = null;
+let segmentationId = 0;
+let segmentationJob = null;
+function releaseSegmenter() {
+  segmentationWorker?.terminate();
+  segmentationWorker = null;
+  if (segmentationJob) { clearTimeout(segmentationJob.timer); segmentationJob.reject(new Error('Background removal stopped. Try again.')); segmentationJob = null; }
+}
+function getMask(image) {
+  if (!segmentationWorker) {
+    segmentationWorker = new Worker(new URL('./segmentation.worker.js', import.meta.url), { type: 'module' });
+    segmentationWorker.onmessage = ({ data }) => {
+      const job = segmentationJob;
+      if (!job || job.id !== data.id) return;
+      if (data.type === 'status') $('#model-status').textContent = data.message;
+      if (data.type === 'progress') $('#model-progress-fill').style.width = `${Math.round(data.progress)}%`;
+      if (data.type === 'result' || data.type === 'error') {
+        clearTimeout(job.timer); segmentationJob = null;
+        if (data.type === 'result') job.resolve(data.mask);
+        else { job.reject(new Error(data.message)); releaseSegmenter(); }
+      }
+    };
+    segmentationWorker.onerror = () => releaseSegmenter();
+    segmentationWorker.onmessageerror = () => releaseSegmenter();
+  }
+  const pixels = image.getContext('2d').getImageData(0, 0, image.width, image.height).data;
+  return new Promise((resolve, reject) => {
+    const id = ++segmentationId;
+    segmentationJob = { id, resolve, reject, timer: setTimeout(releaseSegmenter, 180_000) };
+    try { segmentationWorker.postMessage({ id, pixels, width: image.width, height: image.height, mobile: mobileDevice }, [pixels.buffer]); }
+    catch (error) { releaseSegmenter(); }
+  });
 }
 
 function addLayers() {
@@ -152,13 +219,12 @@ async function renderText(asset) {
   context.textAlign = 'center';
   context.textBaseline = 'middle';
   lines.forEach((line, index) => context.fillText(line, 512, 50 + lineHeight / 2 + index * lineHeight));
-  const texture = new THREE.CanvasTexture(surface);
-  texture.colorSpace = THREE.SRGBColorSpace;
+  const texture = textureFromCanvas(surface);
   const layer = asset.layers[0];
   const previous = layer.texture;
   layer.texture = texture;
   asset.image = surface;
-  asset.cutoutUrl = surface.toDataURL();
+  asset.cutoutUrl = thumbnailUrl(surface);
   if (layer.mesh) {
     layer.mesh.material.map = texture;
     layer.mesh.material.needsUpdate = true;
@@ -166,7 +232,7 @@ async function renderText(asset) {
     layer.mesh.geometry = new THREE.PlaneGeometry(2.1, 2.1 * surface.height / surface.width);
     layer.mesh.visible = layer.visible;
   }
-  previous?.dispose();
+  releaseTexture(previous);
   const thumbnail = $(`[data-select-asset="${state.assets.indexOf(asset)}"] img`);
   if (thumbnail) thumbnail.src = asset.cutoutUrl;
   return true;
@@ -191,7 +257,7 @@ async function addText() {
   $('#text-content').select();
   const rendered = await queueText(asset);
   if (!rendered && asset.revision === 1 && state.assets.includes(asset)) {
-    asset.layers[0].texture.dispose();
+    releaseTexture(asset.layers[0].texture);
     state.assets.splice(state.assets.indexOf(asset), 1);
     addLayers();
   }
@@ -238,9 +304,8 @@ function updateLayerList() {
   editor.querySelectorAll('[data-layer-action="delete"]').forEach((button) => button.addEventListener('click', (event) => {
     const index = Number(event.currentTarget.dataset.assetIndex);
     const asset = state.assets[index];
-    URL.revokeObjectURL(asset.previewUrl);
-    asset.layers.forEach((layer) => layer.texture.dispose());
-    asset.image.close();
+    asset.layers.forEach((layer) => releaseTexture(layer.texture));
+    asset.image.width = asset.image.height = 1;
     state.assets.splice(index, 1);
     state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1));
     $('#asset-meta').textContent = `${photoCount()} / 5`;
@@ -248,15 +313,6 @@ function updateLayerList() {
     addLayers();
   }));
   syncTextControls();
-}
-
-async function loadModel() {
-  $('#model-status').textContent = 'Setting up background removal…';
-  $('#model-progress').classList.add('visible');
-  state.segmenter = await pipeline('image-segmentation', 'briaai/RMBG-1.4', { device: 'wasm', dtype: 'q8' , progress_callback: (progress) => {
-    if (progress.status === 'progress' && progress.total) $('#model-progress-fill').style.width = `${Math.round(progress.progress || 0)}%`;
-  }});
-  $('#model-progress-fill').style.width = '100%'; $('#model-status').textContent = 'Ready to cut';
 }
 
 function isHeic(file) {
@@ -271,6 +327,16 @@ async function prepareImageFile(file) {
   if (!isHeic(file)) return file;
   $('#model-status').textContent = 'Opening HEIC photo…';
   $('#model-progress').classList.add('visible');
+  // Safari can decode HEIC natively; avoid loading a second decoder and
+  // keeping its full-resolution buffers beside the segmentation model.
+  let nativeImage;
+  try {
+    nativeImage = await decodeImage(file);
+    const blob = await new Promise((resolve, reject) => nativeImage.toBlob((value) => value ? resolve(value) : reject(new Error('Image conversion failed')), 'image/jpeg', 0.9));
+    return new File([blob], file.name.replace(/\.hei[cf]$/i, '') + '.jpg', { type: 'image/jpeg' });
+  } catch (error) {
+    // Browsers without native HEIC decoding still use the existing converter.
+  } finally { if (nativeImage) nativeImage.width = nativeImage.height = 1; }
   const { default: heic2any } = await import('heic2any');
   const result = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.92 });
   const blob = Array.isArray(result) ? result[0] : result;
@@ -280,16 +346,18 @@ async function prepareImageFile(file) {
 
 async function segmentImage(file) {
   $('#model-status').textContent = 'Opening your photo…'; $('#model-progress').classList.add('visible');
-  if (!state.segmenter) await loadModel();
   const preparedFile = await prepareImageFile(file);
-  const image = await createImageBitmap(preparedFile);
-  $('#model-status').textContent = 'Removing background…'; $('#model-progress-fill').style.width = '100%';
-  const result = await state.segmenter(preparedFile);
-  const mask = result[0]?.mask;
-  if (!mask?.data || !mask.width || !mask.height) throw new Error('RMBG returned an invalid mask');
+  const image = await decodeImage(preparedFile);
+  $('#model-status').textContent = 'Preparing background removal…'; $('#model-progress-fill').style.width = '100%';
+  let mask;
+  try { mask = await getMask(image); } catch (error) { image.width = image.height = 1; throw error; }
+  if (!mask?.data || !mask.width || !mask.height) { image.width = image.height = 1; throw new Error('Background removal returned no mask'); }
   const maskTexture = drawTexture(image, mask, false);
   const invertedTexture = drawTexture(image, mask, true);
-  state.assets.push({ file, image, previewUrl: URL.createObjectURL(preparedFile), cutoutUrl: maskTexture.image.toDataURL(), size: 0.66 + (state.assets.length % 3) * 0.09, layers: [
+  const previewUrl = thumbnailUrl(image);
+  const dimensions = { width: image.width, height: image.height };
+  image.width = image.height = 1;
+  state.assets.push({ file, image: dimensions, previewUrl, cutoutUrl: thumbnailUrl(maskTexture.image), size: 0.66 + (state.assets.length % 3) * 0.09, layers: [
     { kind: 'mask', label: 'MASK', texture: maskTexture, visible: state.mode !== 'inverted', height: 0, angle: 0, scale: 1, order: state.nextLayerOrder++ },
     { kind: 'invert', label: 'INVERT', texture: invertedTexture, visible: state.mode === 'inverted', height: 0, angle: 0, scale: 1, order: state.nextLayerOrder++ }
   ] });
@@ -337,7 +405,7 @@ function clearBackgroundImage() {
   $('#export-btn').disabled = !state.assets.length || state.exporting;
   $$('[data-background]').forEach((button) => { button.classList.remove('selected'); button.setAttribute('aria-pressed', 'false'); });
   if (state.backgroundTexture) state.backgroundTexture.dispose();
-  if (state.backgroundBitmap) state.backgroundBitmap.close();
+  if (state.backgroundBitmap) state.backgroundBitmap.width = state.backgroundBitmap.height = 1;
   state.backgroundTexture = null;
   state.backgroundBitmap = null;
   scene.background = new THREE.Color(state.canvasColor);
@@ -353,15 +421,11 @@ async function setBackgroundImage(file, preset = null, request = ++backgroundReq
   $('#background-image-meta').textContent = 'Loading background…';
   try {
   const preparedFile = await prepareImageFile(file);
-  // ImageBitmap textures bypass Three.js's texture.flipY handling, so orient
-  // the pixels for WebGL while decoding them.
-  const bitmap = await createImageBitmap(preparedFile, { imageOrientation: 'flipY' });
-  if (request !== backgroundRequest) { bitmap.close(); return; }
+  const bitmap = await decodeImage(preparedFile, imageLimit);
+  if (request !== backgroundRequest) { bitmap.width = bitmap.height = 1; return; }
   if (state.backgroundTexture) state.backgroundTexture.dispose();
-  if (state.backgroundBitmap) state.backgroundBitmap.close();
-  const texture = new THREE.Texture(bitmap);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.needsUpdate = true;
+  if (state.backgroundBitmap) state.backgroundBitmap.width = state.backgroundBitmap.height = 1;
+  const texture = textureFromCanvas(bitmap);
   state.backgroundBitmap = bitmap;
   state.backgroundTexture = texture;
   scene.background = texture;
@@ -434,7 +498,7 @@ const handleUpload = async (files) => {
   const incoming = Array.from(files || []).filter(isSupportedImage).slice(0, 5 - photoCount());
   try {
     for (const file of incoming) await segmentImage(file).catch((error) => { console.error(error); $('#model-status').textContent = 'Could not create cutout. Try another photo.'; });
-  } finally { uploading = false; $('#upload-trigger').setAttribute('aria-busy', 'false'); $('#upload').value = ''; $('#upload-trigger').disabled = photoCount() >= 5; $('#empty-upload').disabled = false; }
+  } finally { releaseSegmenter(); uploading = false; $('#upload-trigger').setAttribute('aria-busy', 'false'); $('#upload').value = ''; $('#upload-trigger').disabled = photoCount() >= 5; $('#empty-upload').disabled = false; }
 };
 $('#upload').addEventListener('change', (event) => handleUpload(event.target.files));
 $('#upload-trigger').addEventListener('click', () => $('#upload').click());
@@ -478,7 +542,7 @@ $('#background-image-clear').addEventListener('click', clearBackgroundImage);
 $('#direction').addEventListener('click', () => { state.direction *= -1; $('#direction').classList.toggle('reverse', state.direction < 0); });
 $('#export-btn').addEventListener('click', exportLoop);
 
-function animate() { requestAnimationFrame(animate); if (!state.exporting && state.playing) { state.turntableAngle += 0.0025 * state.speed * state.direction; state.assets.forEach((asset, index) => { asset.axis.rotation.y = state.turntableAngle + index * state.depth; }); } controls.update(); renderer.render(scene, camera); }
+function animate() { requestAnimationFrame(animate); if (!state.exporting && state.playing && !document.hidden) { state.turntableAngle += 0.0025 * state.speed * state.direction; state.assets.forEach((asset, index) => { asset.axis.rotation.y = state.turntableAngle + index * state.depth; }); } if (!state.exporting && !document.hidden && !renderer.getContext().isContextLost()) { controls.update(); renderer.render(scene, camera); } }
 let currentSheet = null;
 function openSheet(name) {
   currentSheet = name;
@@ -503,13 +567,13 @@ $('#clean-preview').addEventListener('click', () => { const clean = document.bod
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { openSheet(null); document.body.classList.remove('clean-mode'); resize(); } });
 $('#add-text').addEventListener('click', addText);
 $('#text-content').addEventListener('input', (event) => { const asset = selectedText(); if (!asset || state.exporting) return; asset.text = event.currentTarget.value; queueText(asset); });
-$$('[data-font]').forEach((button) => button.addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; asset.font = button.dataset.font; syncTextControls(); renderText(asset); }));
+$$('[data-font]').forEach((button) => button.addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; asset.font = button.dataset.font; syncTextControls(); queueText(asset); }));
 $('#text-color').addEventListener('input', (event) => { const asset = selectedText(); if (!asset || state.exporting) return; asset.color = event.currentTarget.value; queueText(asset); });
 for (const [id, key] of [['text-size', 'scale'], ['text-height', 'height']]) {
   $(`#${id}`).addEventListener('input', (event) => { const asset = selectedText(); if (!asset || state.exporting) return; const layer = asset.layers[0]; layer[key] = Number(event.currentTarget.value); layer.mesh.scale.setScalar(asset.size * state.scale * layer.scale); layer.mesh.position.y = state.pivotY + layer.height; });
 }
 $('#text-visibility').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; asset.layers[0].visible = !asset.layers[0].visible; addLayers(); });
-$('#delete-text').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; asset.layers[0].texture.dispose(); state.assets.splice(state.selectedAsset, 1); state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1)); addLayers(); });
+$('#delete-text').addEventListener('click', () => { const asset = selectedText(); if (!asset || state.exporting) return; releaseTexture(asset.layers[0].texture); state.assets.splice(state.selectedAsset, 1); state.selectedAsset = Math.max(0, Math.min(state.selectedAsset, state.assets.length - 1)); addLayers(); });
 function fitViewport() {
   document.documentElement.style.setProperty('--app-height', `${window.visualViewport?.height || window.innerHeight}px`);
 }
